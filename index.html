@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#12323a">
+    <meta name="description" content="ESP8266 远程鱼食投喂器控制台">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self' wss://mixio.mixly.cn:8084; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self' https://mixio.mixly.cn; style-src 'self'">
+    <title>鱼缸投喂器</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://mixio.mixly.cn/js/mqtt.min.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">F</span>
+        <div>
+          <p class="eyebrow">AQUARIUM CONTROL</p>
+          <h1>鱼缸投喂器</h1>
+        </div>
+      </div>
+          <button id="open-settings" class="button button-quiet" type="button">手机授权</button>
+    </header>
+
+    <main class="app-shell">
+      <section class="connection-strip" aria-label="连接状态">
+        <div>
+          <span id="broker-dot" class="status-dot status-idle" aria-hidden="true"></span>
+          <span>MixIO</span>
+          <strong id="broker-status">未配置</strong>
+        </div>
+        <div>
+          <span id="device-dot" class="status-dot status-idle" aria-hidden="true"></span>
+          <span>投喂器</span>
+          <strong id="device-status">未知</strong>
+        </div>
+        <span id="device-id" class="device-id">feeder-001</span>
+      </section>
+
+      <details class="setup-guide">
+        <summary>首次配网、换路由器或 Wi-Fi 失效怎么办？</summary>
+        <ol>
+          <li>首次上电，手机连接 <code>fish-feeder-xxxx</code> 热点，密码 <code>fish8266</code>。</li>
+          <li>浏览器打开 <code>http://192.168.4.1</code>，填写家里的 2.4GHz Wi-Fi；保存后永久记忆。</li>
+          <li>设备正常在线时，手机连接同一个家庭 Wi-Fi，再点“打开 Wi-Fi 设置”即可修改。</li>
+          <li>旧 Wi-Fi 无法使用时，等待约 20 秒让设备自动开热点；也可双击 RST，或按住 FLASH 再按 RST 强制配网。</li>
+        </ol>
+      </details>
+
+      <section class="feed-panel" aria-labelledby="feed-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">REMOTE FEED</p>
+            <h2 id="feed-title">立即投喂</h2>
+          </div>
+          <span id="cooldown-label" class="cooldown-label">等待设备连接</span>
+        </div>
+
+        <div class="portion-selector" role="group" aria-label="投喂份量">
+          <button class="portion-button is-selected" type="button" data-portion="1">1 份</button>
+          <button class="portion-button" type="button" data-portion="2">2 份</button>
+          <button class="portion-button" type="button" data-portion="3">3 份</button>
+        </div>
+
+        <button id="feed-button" class="feed-button" type="button" disabled>
+          <span id="feed-button-title">立即投喂</span>
+          <small id="feed-button-note">设备在线后可操作</small>
+        </button>
+        <p id="action-message" class="action-message" role="status" aria-live="polite">请先完成连接设置。</p>
+      </section>
+
+      <section class="schedule-panel" aria-labelledby="schedule-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">DEVICE SCHEDULE</p>
+            <h2 id="schedule-title">定时投喂</h2>
+          </div>
+          <button id="add-schedule" class="button button-primary" type="button" disabled>添加计划</button>
+        </div>
+        <p class="schedule-intro">计划保存在投喂器中，网页关闭后仍会按北京时间执行；最多可设置 6 条。</p>
+        <div id="schedule-list" class="schedule-list">
+          <div class="schedule-empty">连接设备后读取计划</div>
+        </div>
+      </section>
+
+      <section class="telemetry-panel" aria-labelledby="telemetry-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">DEVICE TELEMETRY</p>
+            <h2 id="telemetry-title">设备状态</h2>
+          </div>
+          <div class="panel-actions">
+            <button id="open-device-wifi" class="button button-quiet" type="button" disabled>打开 Wi-Fi 设置</button>
+            <button id="refresh-state" class="button button-quiet" type="button" disabled>请求状态</button>
+          </div>
+        </div>
+        <p id="wifi-help" class="panel-note">手机与投喂器连接同一个家庭 Wi-Fi 后，可以在这里修改设备网络。</p>
+        <dl class="telemetry-grid">
+          <div><dt>最后在线</dt><dd id="last-seen">--</dd></div>
+          <div><dt>设备局域网 IP</dt><dd id="device-ip">--</dd></div>
+          <div><dt>当前 Wi-Fi</dt><dd id="wifi-name">--</dd></div>
+          <div><dt>Wi-Fi 信号</dt><dd id="rssi">--</dd></div>
+          <div><dt>可用内存</dt><dd id="free-heap">--</dd></div>
+          <div><dt>固件版本</dt><dd id="firmware">--</dd></div>
+          <div><dt>设备时间</dt><dd id="clock-state">--</dd></div>
+          <div><dt>24 小时份量</dt><dd id="daily-portions">--</dd></div>
+          <div><dt>最近投喂</dt><dd id="last-feed">--</dd></div>
+          <div><dt>投喂来源</dt><dd id="last-feed-source">--</dd></div>
+          <div class="telemetry-wide"><dt>设备信息</dt><dd id="last-error">尚未收到状态</dd></div>
+        </dl>
+      </section>
+
+      <section class="history-panel" aria-labelledby="history-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">LOCAL HISTORY</p>
+            <h2 id="history-title">本机操作记录</h2>
+          </div>
+          <button id="clear-history" class="button button-quiet" type="button">清空</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>时间</th><th>份量</th><th>状态</th><th>说明</th></tr>
+            </thead>
+            <tbody id="history-body">
+              <tr><td colspan="4" class="empty">暂无操作记录</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <dialog id="schedule-dialog">
+      <form id="schedule-form" class="settings-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">FEEDING PLAN</p>
+            <h2 id="schedule-dialog-title">添加投喂计划</h2>
+          </div>
+          <button id="close-schedule" class="dialog-close" type="button" aria-label="关闭" title="关闭">×</button>
+        </div>
+
+        <label>
+          <span>执行时间（北京时间）</span>
+          <input id="schedule-time" type="time" value="08:00" required>
+        </label>
+        <label>
+          <span>每次投喂份量</span>
+          <select id="schedule-portion" required>
+            <option value="1">1 份</option>
+            <option value="2">2 份</option>
+            <option value="3">3 份</option>
+          </select>
+        </label>
+
+        <fieldset class="weekday-fieldset">
+          <legend>重复日期</legend>
+          <div class="weekday-presets" aria-label="快捷选择日期">
+            <button class="button button-quiet" type="button" data-days-mask="127">每天</button>
+            <button class="button button-quiet" type="button" data-days-mask="62">工作日</button>
+            <button class="button button-quiet" type="button" data-days-mask="65">周末</button>
+            <button class="button button-quiet" type="button" data-days-mask="0">清空</button>
+          </div>
+          <div class="weekday-selector">
+            <label><input type="checkbox" data-day="1" checked><span>一</span></label>
+            <label><input type="checkbox" data-day="2" checked><span>二</span></label>
+            <label><input type="checkbox" data-day="3" checked><span>三</span></label>
+            <label><input type="checkbox" data-day="4" checked><span>四</span></label>
+            <label><input type="checkbox" data-day="5" checked><span>五</span></label>
+            <label><input type="checkbox" data-day="6" checked><span>六</span></label>
+            <label><input type="checkbox" data-day="0" checked><span>日</span></label>
+          </div>
+        </fieldset>
+
+        <label class="remember-row">
+          <input id="schedule-enabled" type="checkbox" checked>
+          <span>启用这条计划</span>
+        </label>
+        <p class="settings-note">设备必须至少成功联网校时一次。若多条计划在同一分钟重叠，安全间隔会阻止重复出粮。</p>
+        <p id="schedule-error" class="settings-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button id="cancel-schedule" class="button button-secondary" type="button">取消</button>
+          <button id="save-schedule" class="button button-primary" type="submit">保存到投喂器</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="settings-dialog">
+      <form id="settings-form" method="dialog" class="settings-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">MIXIO CONNECTION</p>
+            <h2>手机授权</h2>
+          </div>
+          <button id="close-settings" class="dialog-close" type="button" aria-label="关闭" title="关闭">×</button>
+        </div>
+
+        <label>
+          <span>MixIO 用户名</span>
+          <input id="mixio-username" name="username" autocomplete="username" required placeholder="注册账号中的用户名">
+        </label>
+        <label>
+          <span>项目名称</span>
+          <input id="mixio-project" name="project" autocomplete="off" required placeholder="例如 fish-feeder">
+        </label>
+        <label>
+          <span>项目密码</span>
+          <input id="mixio-password" name="password" type="password" autocomplete="current-password" required placeholder="不是账号登录密码">
+        </label>
+        <label>
+          <span>命令签名密钥</span>
+          <div class="secret-row">
+            <input id="command-secret" name="commandSecret" type="password" autocomplete="off" minlength="24" required placeholder="与 ESP8266 config.h 完全一致">
+            <button id="generate-secret" class="button button-secondary" type="button">生成</button>
+            <button id="copy-secret" class="button button-secondary" type="button">复制</button>
+          </div>
+        </label>
+
+        <label class="remember-row">
+          <input id="remember-config" type="checkbox" checked>
+          <span>保存在当前浏览器中</span>
+        </label>
+
+        <p class="settings-note">配置只保存在当前手机。授权链接包含项目密码和签名密钥，只能私下发给可信的人；浏览器导入后会立即清除地址栏中的授权信息。</p>
+        <p id="settings-error" class="settings-error" role="alert"></p>
+
+        <div class="dialog-actions">
+          <button id="clear-config" class="button button-danger" type="button">清除配置</button>
+          <button id="copy-share-link" class="button button-secondary" type="button">复制授权链接</button>
+          <button class="button button-primary" type="submit">保存并连接</button>
+        </div>
+      </form>
+    </dialog>
+
+    <noscript>此控制台需要启用 JavaScript。</noscript>
+  </body>
+</html>

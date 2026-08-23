@@ -1,0 +1,9 @@
+{
+  "name": "zero-cost-fish-feeder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Custom MixIO MQTT control panel for an ESP8266 servo fish feeder",
+  "scripts": {
+    "check": "node --check app.js"
+  }
+}
