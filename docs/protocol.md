@@ -8,7 +8,7 @@
 { "v": 1 }
 ```
 
-增加不兼容字段时应提升版本号。ESP8266 接受版本 1 的手动投喂和计划更新命令。
+增加不兼容字段时应提升版本号。ESP8266 接受版本 1 的手动投喂、计划更新和设备参数更新命令。
 
 ## 2. 投喂命令
 
@@ -107,7 +107,23 @@ v|id|action|schedule_data|issued_at|expires_at
 
 设备校验签名、时效和字段范围后，把整组计划写入 EEPROM。计划固定使用 UTC+8 北京时间执行。
 
-## 5. 设备确认
+## 5. 设备参数更新命令
+
+设备参数更新与其它命令共用 `feeder_cmd` 主题，`action` 为 `set_config`。网页将参数编码为：
+
+```text
+舵机模式,关闭角度,投喂角度,连续转动角度,一圈耗时毫秒,正转脉宽,反转脉宽,停止脉宽,投喂方向,动作完成后,最短间隔秒数,每日最大份量,每日最大次数
+```
+
+例如 `1,12,92,180,2000,1700,1300,1500,0,0,60,12,8`。模式 `1` 为360°连续旋转，按“连续转动角度 ÷ 360 × 一圈耗时”计算运行时间；动作完成后字段 `0` 表示单向转动后停止，`1` 表示用反向脉宽转回同样时间再停止。模式 `0` 为180°定位舵机，使用关闭角度和投喂角度。连续舵机的正转/反转/停止脉宽可校准，投喂方向可选。最短间隔范围为10～86400秒，每日最大份量为1～300，每日最大次数为1～100。参数和最近参数命令编号会保存到 EEPROM，多个手机同时操作时使用命令时间阻止旧配置覆盖新配置。
+
+签名原文为：
+
+```text
+v|id|set_config|config_data|issued_at|expires_at
+```
+
+## 6. 设备确认
 
 主题：
 
@@ -147,7 +163,9 @@ v|id|action|schedule_data|issued_at|expires_at
 | `invalid_payload` | JSON 字段或命令类型错误 |
 | `invalid_portion` | 份量超出固件范围 |
 | `invalid_schedule` | 定时计划字段、数量或日期掩码无效 |
+| `invalid_config` | 设备参数超出固件允许范围 |
 | `stale_schedule` | 计划更新时间早于设备已保存的版本 |
+| `stale_config` | 参数更新时间早于设备已保存的版本 |
 | `clock_not_ready` | NTP 尚未同步，无法验证时效 |
 | `command_expired` | 命令太旧、已过期或时间异常 |
 | `invalid_signature` | HMAC 签名不匹配 |
@@ -156,8 +174,9 @@ v|id|action|schedule_data|issued_at|expires_at
 | `daily_limit` | 24 小时窗口份量达到上限 |
 | `servo_failed` | 舵机对象无法启动或动作失败 |
 | `schedule_updated` | 定时计划已写入 EEPROM |
+| `config_updated` | 设备参数已写入 EEPROM |
 
-## 6. 设备状态
+## 7. 设备状态
 
 主题：
 
@@ -172,7 +191,7 @@ v|id|action|schedule_data|issued_at|expires_at
   "v": 1,
   "online": true,
   "device_id": "feeder-001",
-  "firmware": "1.1.0",
+  "firmware": "1.3.0",
   "rssi": -58,
   "wifi_ssid": "home-2.4g",
   "ip": "192.168.1.88",
@@ -184,8 +203,20 @@ v|id|action|schedule_data|issued_at|expires_at
   "last_feed_at": 1786924700,
   "last_feed_source": "schedule",
   "portions_24h": 2,
+  "feeds_24h": 1,
   "max_portions_24h": 12,
+  "max_feeds_24h": 8,
   "min_interval_seconds": 60,
+  "servo_closed_angle": 12,
+  "servo_open_angle": 92,
+  "servo_mode": 1,
+  "continuous_turn_degrees": 180,
+  "continuous_ms_per_rev": 2000,
+  "continuous_forward_us": 1700,
+  "continuous_reverse_us": 1300,
+  "continuous_stop_us": 1500,
+  "continuous_direction": 0,
+  "continuous_return": false,
   "last_error": "",
   "timezone_offset_minutes": 480,
   "schedules": [
@@ -198,7 +229,7 @@ v|id|action|schedule_data|issued_at|expires_at
 
 定时任务因安全间隔或每日上限被跳过时，`last_error` 分别为 `schedule_cooldown` 或 `schedule_daily_limit`。
 
-## 7. 在线状态和遗嘱
+## 8. 在线状态和遗嘱
 
 主题：
 
@@ -220,7 +251,7 @@ v|id|action|schedule_data|issued_at|expires_at
 
 网页还设置了 180 秒状态超时。即使遗嘱没有及时到达，长期没有任何设备消息也会显示离线。
 
-## 8. 状态查询
+## 9. 状态查询
 
 网页向 `feeder_query` 发布：
 
@@ -230,7 +261,7 @@ v|id|action|schedule_data|issued_at|expires_at
 
 查询不触发执行机构，因此没有签名。设备收到后立即重新发布 `feeder_state`。
 
-## 9. 防重放流程
+## 10. 防重放流程
 
 设备按顺序检查：
 
@@ -245,7 +276,7 @@ v|id|action|schedule_data|issued_at|expires_at
 
 全部通过后，设备先把 UUID、投喂时间和份量写入 EEPROM，然后才驱动舵机。这个顺序选择“可能漏投一次，也不重复投喂”，更适合鱼食投喂安全。
 
-## 10. 定时执行流程
+## 11. 定时执行流程
 
 设备每个本地分钟检查一次计划：
 
@@ -258,7 +289,7 @@ v|id|action|schedule_data|issued_at|expires_at
 
 先记录当天已运行，是为了断电恢复后不重复出粮。动作前突然断电时可能漏掉一次，这符合“宁可漏一次，也不重复过量”的安全原则。
 
-## 11. EEPROM 写入策略
+## 12. EEPROM 写入策略
 
 每次有效投喂写入一次 EEPROM，普通家用每天写入次数很少。保存内容包括：
 
@@ -273,7 +304,7 @@ v|id|action|schedule_data|issued_at|expires_at
 
 如果 EEPROM 数据损坏，固件会重置安全状态。实际鱼粮是否已经投喂无法从损坏状态恢复，遇到异常后应人工检查鱼缸。
 
-## 12. 安全说明
+## 13. 安全说明
 
 HMAC 能保证命令真实性和完整性，结合时间和 UUID 可以抵御普通伪造与重放。但由于 ESP8266 到 MixIO 使用未加密 MQTT 1883：
 

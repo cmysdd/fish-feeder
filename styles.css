@@ -187,6 +187,125 @@ section {
   line-height: 1.55;
 }
 
+.device-config-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.device-config-form label > span {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 7px;
+  color: var(--ink);
+  font-size: .82rem;
+  font-weight: 700;
+}
+
+.device-config-form output {
+  color: var(--brand-dark);
+  font-variant-numeric: tabular-nums;
+}
+
+.device-config-form input[type="range"] {
+  width: 100%;
+  accent-color: var(--brand);
+}
+
+.device-config-form input[type="number"] {
+  width: 100%;
+  min-height: 41px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #fbfcfc;
+  color: var(--ink);
+}
+
+.device-config-form input:focus {
+  outline: 2px solid #9ed2d4;
+  outline-offset: 1px;
+  border-color: var(--brand);
+}
+
+.device-config-actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.device-config-actions .button { flex: 1; }
+
+.config-derived {
+  grid-column: 1 / -1;
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: .82rem;
+}
+
+.config-derived strong {
+  color: var(--brand-dark);
+  font-variant-numeric: tabular-nums;
+}
+
+.device-config-form .settings-error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.mode-help {
+  grid-column: 1 / -1;
+  padding: 10px 12px;
+  background: #eef5f4;
+  border-left: 3px solid #83b4b7;
+  color: #496369;
+  font-size: .8rem;
+  line-height: 1.55;
+}
+
+.advanced-config {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-muted);
+}
+
+.advanced-config summary {
+  cursor: pointer;
+  color: var(--ink);
+  font-size: .82rem;
+  font-weight: 700;
+}
+
+.advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.advanced-grid label > span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: .75rem;
+  font-weight: 700;
+}
+
+.advanced-grid input,
+.advanced-grid select,
+.device-config-form select {
+  width: 100%;
+  min-height: 41px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #fbfcfc;
+  color: var(--ink);
+}
+
 .cooldown-label {
   color: var(--muted);
   font-size: .83rem;
@@ -597,6 +716,9 @@ noscript {
 }
 
 @media (max-width: 680px) {
+  .device-config-form { grid-template-columns: 1fr; }
+  .device-config-actions { align-items: stretch; }
+  .advanced-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .app-header { min-height: 78px; padding: 15px 14px; }
   .brand-mark { width: 38px; height: 38px; }
   .app-shell { width: min(100% - 18px, 980px); padding-top: 12px; }

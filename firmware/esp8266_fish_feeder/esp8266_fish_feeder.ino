@@ -27,8 +27,8 @@ static_assert(
   "MIN_FEED_INTERVAL_SECONDS must be at least COMMAND_MAX_AGE_SECONDS."
 );
 
-static const char *FIRMWARE_VERSION = "1.1.0";
-static const uint32_t SAFETY_MAGIC = 0x46454545UL;
+static const char *FIRMWARE_VERSION = "1.3.0";
+static const uint32_t SAFETY_MAGIC = 0x46454547UL;
 static const uint32_t WIFI_CONFIG_MAGIC = 0x57494649UL;
 static const uint32_t DOUBLE_RESET_MAGIC = 0x44525354UL;
 static const uint16_t EEPROM_BYTES = 512;
@@ -48,11 +48,27 @@ struct PersistedSafetyState {
   uint32_t magic;
   char lastCommandId[37];
   char lastScheduleCommandId[37];
+  char lastConfigCommandId[37];
   uint32_t lastFeedAt;
   uint32_t windowStartAt;
   uint16_t portionsInWindow;
+  uint16_t feedsInWindow;
   uint8_t scheduleCount;
   uint32_t lastScheduleIssuedAt;
+  uint32_t lastConfigIssuedAt;
+  uint8_t servoMode;
+  uint16_t servoClosedAngle;
+  uint16_t servoOpenAngle;
+  uint16_t continuousTurnDegrees;
+  uint32_t continuousMsPerRev;
+  uint16_t continuousForwardUs;
+  uint16_t continuousReverseUs;
+  uint16_t continuousStopUs;
+  uint8_t continuousDirection;
+  uint8_t continuousReturn;
+  uint32_t minFeedIntervalSeconds;
+  uint16_t maxPortionsPer24h;
+  uint16_t maxFeedsPer24h;
   ScheduleEntry schedules[MAX_SCHEDULES];
   uint16_t checksum;
 };
@@ -65,6 +81,7 @@ struct PersistedWifiConfig {
 };
 
 static_assert(sizeof(PersistedSafetyState) <= EEPROM_BYTES, "Persisted state exceeds EEPROM allocation.");
+static_assert(sizeof(PersistedSafetyState) <= WIFI_CONFIG_OFFSET, "Persisted state overlaps Wi-Fi configuration.");
 static_assert(WIFI_CONFIG_OFFSET + sizeof(PersistedWifiConfig) <= EEPROM_BYTES, "Wi-Fi config exceeds EEPROM allocation.");
 
 WiFiClient networkClient;
@@ -208,6 +225,19 @@ void resetSafetyState(uint32_t now = 0) {
   memset(&safetyState, 0, sizeof(safetyState));
   safetyState.magic = SAFETY_MAGIC;
   safetyState.windowStartAt = now;
+  safetyState.servoClosedAngle = SERVO_CLOSED_ANGLE;
+  safetyState.servoOpenAngle = SERVO_OPEN_ANGLE;
+  safetyState.servoMode = SERVO_MODE_DEFAULT;
+  safetyState.continuousTurnDegrees = SERVO_CONTINUOUS_TURN_DEGREES;
+  safetyState.continuousMsPerRev = SERVO_CONTINUOUS_MS_PER_REV;
+  safetyState.continuousForwardUs = SERVO_CONTINUOUS_FORWARD_US;
+  safetyState.continuousReverseUs = SERVO_CONTINUOUS_REVERSE_US;
+  safetyState.continuousStopUs = SERVO_CONTINUOUS_STOP_US;
+  safetyState.continuousDirection = 0;
+  safetyState.continuousReturn = 0;
+  safetyState.minFeedIntervalSeconds = MIN_FEED_INTERVAL_SECONDS;
+  safetyState.maxPortionsPer24h = MAX_PORTIONS_PER_24H;
+  safetyState.maxFeedsPer24h = DEFAULT_MAX_FEEDS_PER_24H;
   saveSafetyState();
 }
 
@@ -218,6 +248,24 @@ void loadSafetyState() {
   if (
     safetyState.magic != SAFETY_MAGIC ||
     safetyState.scheduleCount > MAX_SCHEDULES ||
+    safetyState.servoMode > 1 ||
+    safetyState.servoClosedAngle > 180 ||
+    safetyState.servoOpenAngle > 180 ||
+    (safetyState.servoMode == 0 && safetyState.servoClosedAngle == safetyState.servoOpenAngle) ||
+    safetyState.continuousTurnDegrees > 360 ||
+    safetyState.continuousMsPerRev < 250 ||
+    safetyState.continuousMsPerRev > 10000UL ||
+    safetyState.continuousForwardUs < 1000 || safetyState.continuousForwardUs > 2000 ||
+    safetyState.continuousReverseUs < 1000 || safetyState.continuousReverseUs > 2000 ||
+    safetyState.continuousStopUs < 1400 || safetyState.continuousStopUs > 1600 ||
+    safetyState.continuousDirection > 1 ||
+    safetyState.continuousReturn > 1 ||
+    safetyState.minFeedIntervalSeconds < 10 ||
+    safetyState.minFeedIntervalSeconds > 86400UL ||
+    safetyState.maxPortionsPer24h < 1 ||
+    safetyState.maxPortionsPer24h > 300 ||
+    safetyState.maxFeedsPer24h < 1 ||
+    safetyState.maxFeedsPer24h > 100 ||
     safetyState.checksum != calculateChecksum(safetyState)
   ) {
     resetSafetyState();
@@ -319,6 +367,7 @@ void refreshRollingWindow(uint32_t now) {
   ) {
     safetyState.windowStartAt = now;
     safetyState.portionsInWindow = 0;
+    safetyState.feedsInWindow = 0;
     saveSafetyState();
   }
 }
@@ -327,7 +376,7 @@ void publishState() {
   const uint32_t now = epochNow();
   if (now > 0) refreshRollingWindow(now);
 
-  StaticJsonDocument<1152> document;
+  StaticJsonDocument<1536> document;
   document["v"] = 1;
   document["online"] = true;
   document["device_id"] = DEVICE_ID;
@@ -342,8 +391,21 @@ void publishState() {
   document["clock_ready"] = clockReady();
   document["last_feed_at"] = safetyState.lastFeedAt;
   document["portions_24h"] = safetyState.portionsInWindow;
-  document["max_portions_24h"] = MAX_PORTIONS_PER_24H;
-  document["min_interval_seconds"] = MIN_FEED_INTERVAL_SECONDS;
+  document["feeds_24h"] = safetyState.feedsInWindow;
+  document["max_portions_24h"] = safetyState.maxPortionsPer24h;
+  document["max_feeds_24h"] = safetyState.maxFeedsPer24h;
+  document["min_interval_seconds"] = safetyState.minFeedIntervalSeconds;
+  document["servo_closed_angle"] = safetyState.servoClosedAngle;
+  document["servo_open_angle"] = safetyState.servoOpenAngle;
+  document["servo_travel_degrees"] = abs(static_cast<int>(safetyState.servoOpenAngle) - static_cast<int>(safetyState.servoClosedAngle));
+  document["servo_mode"] = safetyState.servoMode;
+  document["continuous_turn_degrees"] = safetyState.continuousTurnDegrees;
+  document["continuous_ms_per_rev"] = safetyState.continuousMsPerRev;
+  document["continuous_forward_us"] = safetyState.continuousForwardUs;
+  document["continuous_reverse_us"] = safetyState.continuousReverseUs;
+  document["continuous_stop_us"] = safetyState.continuousStopUs;
+  document["continuous_direction"] = safetyState.continuousDirection;
+  document["continuous_return"] = safetyState.continuousReturn == 1;
   document["last_error"] = lastError;
   document["last_feed_source"] = lastFeedSource;
   document["timezone_offset_minutes"] = TIMEZONE_OFFSET_SECONDS / 60UL;
@@ -382,12 +444,48 @@ bool runServoCycles(int portion) {
   feederServo.attach(SERVO_PIN, 500, 2400);
   if (!feederServo.attached()) return false;
 
-  feederServo.write(SERVO_CLOSED_ANGLE);
+  if (safetyState.servoMode == 1) {
+    if (safetyState.continuousTurnDegrees == 0) {
+      feederServo.writeMicroseconds(safetyState.continuousStopUs);
+      waitWithMqtt(120);
+      feederServo.detach();
+      return true;
+    }
+    const uint32_t calculatedRunMs =
+      (static_cast<uint32_t>(safetyState.continuousTurnDegrees) * safetyState.continuousMsPerRev) / 360UL;
+    const uint32_t runMs = calculatedRunMs < 50UL ? 50UL : calculatedRunMs;
+    const uint16_t driveUs = safetyState.continuousDirection == 1
+      ? safetyState.continuousReverseUs
+      : safetyState.continuousForwardUs;
+    const uint16_t returnUs = safetyState.continuousDirection == 1
+      ? safetyState.continuousForwardUs
+      : safetyState.continuousReverseUs;
+    feederServo.writeMicroseconds(safetyState.continuousStopUs);
+    waitWithMqtt(120);
+    for (int i = 0; i < portion; ++i) {
+      feederServo.writeMicroseconds(driveUs);
+      waitWithMqtt(runMs);
+      feederServo.writeMicroseconds(safetyState.continuousStopUs);
+      waitWithMqtt(120);
+      if (safetyState.continuousReturn == 1) {
+        feederServo.writeMicroseconds(returnUs);
+        waitWithMqtt(runMs);
+        feederServo.writeMicroseconds(safetyState.continuousStopUs);
+      }
+      waitWithMqtt(SERVO_SETTLE_MS);
+    }
+    feederServo.detach();
+    return true;
+  }
+
+  feederServo.write(safetyState.servoClosedAngle);
   waitWithMqtt(250);
   for (int i = 0; i < portion; ++i) {
-    feederServo.write(SERVO_OPEN_ANGLE);
-    waitWithMqtt(SERVO_OPEN_MS);
-    feederServo.write(SERVO_CLOSED_ANGLE);
+    feederServo.write(safetyState.servoOpenAngle);
+    const uint32_t travel = static_cast<uint32_t>(abs(static_cast<int>(safetyState.servoOpenAngle) - static_cast<int>(safetyState.servoClosedAngle)));
+    const uint32_t travelWait = travel * 8UL;
+    waitWithMqtt(travelWait > SERVO_OPEN_MS ? travelWait : SERVO_OPEN_MS);
+    feederServo.write(safetyState.servoClosedAngle);
     waitWithMqtt(SERVO_SETTLE_MS);
   }
   feederServo.detach();
@@ -403,6 +501,12 @@ void rejectCommand(const String &id, int portion, const char *reason) {
 void rejectScheduleCommand(const String &id, const char *reason) {
   lastError = reason;
   publishAcknowledgement(id.length() ? id : "unknown", "rejected", 0, reason, "set_schedule");
+  publishState();
+}
+
+void rejectConfigCommand(const String &id, const char *reason) {
+  lastError = reason;
+  publishAcknowledgement(id.length() ? id : "unknown", "rejected", 0, reason, "set_config");
   publishState();
 }
 
@@ -549,6 +653,103 @@ void processScheduleCommand(JsonDocument &document) {
   publishState();
 }
 
+void processConfigCommand(JsonDocument &document) {
+  const int version = document["v"] | 0;
+  const String commandId = document["id"] | "";
+  const String action = document["action"] | "";
+  const String configData = document["config_data"] | "";
+  const uint32_t issuedAt = document["issued_at"] | 0;
+  const uint32_t expiresAt = document["expires_at"] | 0;
+  const String receivedSignature = document["sig"] | "";
+
+  if (version != 1 || !validCommandId(commandId) || action != "set_config" || configData.length() > 64) {
+    rejectConfigCommand(commandId, "invalid_payload");
+    return;
+  }
+  if (!clockReady()) {
+    rejectConfigCommand(commandId, "clock_not_ready");
+    return;
+  }
+  const uint32_t now = epochNow();
+  if (!validCommandTime(issuedAt, expiresAt, now)) {
+    rejectConfigCommand(commandId, "command_expired");
+    return;
+  }
+  const String canonical = String(version) + "|" + commandId + "|" + action + "|" +
+    configData + "|" + String(issuedAt) + "|" + String(expiresAt);
+  if (!constantTimeEquals(receivedSignature, hmacSha256(COMMAND_SECRET, canonical))) {
+    rejectConfigCommand(commandId, "invalid_signature");
+    return;
+  }
+  if (commandId.equals(safetyState.lastConfigCommandId)) {
+    publishAcknowledgement(commandId, "duplicate", 0, "duplicate_command", "set_config");
+    return;
+  }
+  if (safetyState.lastConfigIssuedAt > 0 && issuedAt < safetyState.lastConfigIssuedAt) {
+    rejectConfigCommand(commandId, "stale_config");
+    return;
+  }
+
+  int mode = 0;
+  int closedAngle = 0;
+  int openAngle = 0;
+  int turnDegrees = 0;
+  unsigned long msPerRev = 0;
+  int forwardUs = 0;
+  int reverseUs = 0;
+  int stopUs = 0;
+  int direction = 0;
+  int continuousReturn = 0;
+  unsigned long minInterval = 0;
+  int maxPortions = 0;
+  int maxFeeds = 0;
+  char extra = '\0';
+  const int matched = sscanf(configData.c_str(), "%d,%d,%d,%d,%lu,%d,%d,%d,%d,%d,%lu,%d,%d%c",
+    &mode, &closedAngle, &openAngle, &turnDegrees, &msPerRev, &forwardUs, &reverseUs, &stopUs,
+    &direction, &continuousReturn, &minInterval, &maxPortions, &maxFeeds, &extra);
+  if (
+    matched != 13 ||
+    (mode != 0 && mode != 1) ||
+    closedAngle < 0 || closedAngle > 180 ||
+    openAngle < 0 || openAngle > 180 || (mode == 0 && closedAngle == openAngle) ||
+    turnDegrees < 1 || turnDegrees > 360 ||
+    msPerRev < 250UL || msPerRev > 10000UL ||
+    forwardUs < 1000 || forwardUs > 2000 ||
+    reverseUs < 1000 || reverseUs > 2000 ||
+    stopUs < 1400 || stopUs > 1600 ||
+    (direction != 0 && direction != 1) ||
+    (continuousReturn != 0 && continuousReturn != 1) ||
+    minInterval < 10UL || minInterval > 86400UL ||
+    maxPortions < 1 || maxPortions > 300 ||
+    maxFeeds < 1 || maxFeeds > 100
+  ) {
+    rejectConfigCommand(commandId, "invalid_config");
+    return;
+  }
+
+  safetyState.servoMode = static_cast<uint8_t>(mode);
+  safetyState.servoClosedAngle = static_cast<uint16_t>(closedAngle);
+  safetyState.servoOpenAngle = static_cast<uint16_t>(openAngle);
+  safetyState.continuousTurnDegrees = static_cast<uint16_t>(turnDegrees);
+  safetyState.continuousMsPerRev = static_cast<uint32_t>(msPerRev);
+  safetyState.continuousForwardUs = static_cast<uint16_t>(forwardUs);
+  safetyState.continuousReverseUs = static_cast<uint16_t>(reverseUs);
+  safetyState.continuousStopUs = static_cast<uint16_t>(stopUs);
+  safetyState.continuousDirection = static_cast<uint8_t>(direction);
+  safetyState.continuousReturn = static_cast<uint8_t>(continuousReturn);
+  safetyState.minFeedIntervalSeconds = static_cast<uint32_t>(minInterval);
+  safetyState.maxPortionsPer24h = static_cast<uint16_t>(maxPortions);
+  safetyState.maxFeedsPer24h = static_cast<uint16_t>(maxFeeds);
+  safetyState.lastConfigIssuedAt = issuedAt;
+  memset(safetyState.lastConfigCommandId, 0, sizeof(safetyState.lastConfigCommandId));
+  commandId.toCharArray(safetyState.lastConfigCommandId, sizeof(safetyState.lastConfigCommandId));
+  saveSafetyState();
+
+  lastError = "";
+  publishAcknowledgement(commandId, "completed", 0, "config_updated", "set_config");
+  publishState();
+}
+
 void processFeedCommand(JsonDocument &document) {
   const int version = document["v"] | 0;
   const String commandId = document["id"] | "";
@@ -591,11 +792,12 @@ void processFeedCommand(JsonDocument &document) {
   }
 
   refreshRollingWindow(now);
-  if (safetyState.lastFeedAt > 0 && now >= safetyState.lastFeedAt && now - safetyState.lastFeedAt < MIN_FEED_INTERVAL_SECONDS) {
+  if (safetyState.lastFeedAt > 0 && now >= safetyState.lastFeedAt && now - safetyState.lastFeedAt < safetyState.minFeedIntervalSeconds) {
     rejectCommand(commandId, portion, "cooldown");
     return;
   }
-  if (safetyState.portionsInWindow + portion > MAX_PORTIONS_PER_24H) {
+  if (safetyState.feedsInWindow >= safetyState.maxFeedsPer24h ||
+      safetyState.portionsInWindow + portion > safetyState.maxPortionsPer24h) {
     rejectCommand(commandId, portion, "daily_limit");
     return;
   }
@@ -606,6 +808,7 @@ void processFeedCommand(JsonDocument &document) {
   commandId.toCharArray(safetyState.lastCommandId, sizeof(safetyState.lastCommandId));
   safetyState.lastFeedAt = now;
   safetyState.portionsInWindow += portion;
+  safetyState.feedsInWindow += 1;
   saveSafetyState();
 
   publishAcknowledgement(commandId, "processing", portion, "");
@@ -626,13 +829,14 @@ void runScheduledFeed(uint8_t scheduleIndex, int portion, uint32_t now) {
   if (
     safetyState.lastFeedAt > 0 &&
     now >= safetyState.lastFeedAt &&
-    now - safetyState.lastFeedAt < MIN_FEED_INTERVAL_SECONDS
+    now - safetyState.lastFeedAt < safetyState.minFeedIntervalSeconds
   ) {
     lastError = "schedule_cooldown";
     publishState();
     return;
   }
-  if (safetyState.portionsInWindow + portion > MAX_PORTIONS_PER_24H) {
+  if (safetyState.feedsInWindow >= safetyState.maxFeedsPer24h ||
+      safetyState.portionsInWindow + portion > safetyState.maxPortionsPer24h) {
     lastError = "schedule_daily_limit";
     publishState();
     return;
@@ -640,6 +844,7 @@ void runScheduledFeed(uint8_t scheduleIndex, int portion, uint32_t now) {
 
   safetyState.lastFeedAt = now;
   safetyState.portionsInWindow += portion;
+  safetyState.feedsInWindow += 1;
   saveSafetyState();
 
   lastFeedSource = "schedule";
@@ -713,6 +918,8 @@ void onMqttMessage(char *incomingTopic, byte *payload, unsigned int length) {
     processFeedCommand(document);
   } else if (action == "set_schedule") {
     processScheduleCommand(document);
+  } else if (action == "set_config") {
+    processConfigCommand(document);
   } else {
     rejectCommand(document["id"] | "unknown", 0, "invalid_payload");
   }
@@ -902,7 +1109,8 @@ bool connectMqtt() {
 
 void initializeServoPosition() {
   feederServo.attach(SERVO_PIN, 500, 2400);
-  feederServo.write(SERVO_CLOSED_ANGLE);
+  if (safetyState.servoMode == 1) feederServo.writeMicroseconds(safetyState.continuousStopUs);
+  else feederServo.write(safetyState.servoClosedAngle);
   delay(500);
   feederServo.detach();
 }
@@ -927,7 +1135,7 @@ void setup() {
 
   mqttClient.setServer(MIXIO_HOST, MIXIO_PORT);
   mqttClient.setCallback(onMqttMessage);
-  mqttClient.setBufferSize(1536);
+  mqttClient.setBufferSize(2048);
   mqttClient.setKeepAlive(30);
 
   if (doubleResetRequested || digitalRead(CONFIG_PORTAL_BUTTON_PIN) == LOW) {

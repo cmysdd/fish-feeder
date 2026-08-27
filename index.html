@@ -105,10 +105,80 @@
           <div><dt>固件版本</dt><dd id="firmware">--</dd></div>
           <div><dt>设备时间</dt><dd id="clock-state">--</dd></div>
           <div><dt>24 小时份量</dt><dd id="daily-portions">--</dd></div>
+          <div><dt>24 小时次数</dt><dd id="daily-feeds">--</dd></div>
           <div><dt>最近投喂</dt><dd id="last-feed">--</dd></div>
           <div><dt>投喂来源</dt><dd id="last-feed-source">--</dd></div>
           <div class="telemetry-wide"><dt>设备信息</dt><dd id="last-error">尚未收到状态</dd></div>
         </dl>
+      </section>
+
+      <section class="device-settings-panel" aria-labelledby="device-settings-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">FEEDER PARAMETERS</p>
+            <h2 id="device-settings-title">投喂参数</h2>
+          </div>
+          <span id="config-status" class="cooldown-label">读取设备后可修改</span>
+        </div>
+        <p class="panel-note">参数保存在 ESP8266 中，网页关闭或断电后仍然保留。两种舵机都使用同一根信号线和 MQTT 协议，但控制方式不同：180°舵机按目标角度定位，360°舵机按方向、速度和运行时间控制。</p>
+        <form id="device-config-form" class="device-config-form">
+          <label>
+            <span>舵机类型</span>
+            <select id="servo-mode">
+              <option value="1" selected>360°连续旋转（默认）</option>
+              <option value="0">180°定位舵机</option>
+            </select>
+          </label>
+          <div class="mode-help" id="continuous-help">连续旋转模式：设置每次转动角度和“一圈耗时”。网页会按比例换算运行毫秒数；首次使用请用少量鱼粮校准。</div>
+          <div class="mode-help" id="positional-help">定位模式：设置关闭位置和投喂位置，范围0～180°；不要让舵机撞机械限位。</div>
+          <label class="positional-field">
+            <span>关闭位置 <output id="closed-angle-output">12°</output></span>
+            <input id="closed-angle" type="range" min="0" max="180" step="1" value="12">
+            <input id="closed-angle-number" type="number" min="0" max="180" step="1" value="12" aria-label="关闭位置角度">
+          </label>
+          <label class="positional-field">
+            <span>投喂位置 <output id="open-angle-output">92°</output></span>
+            <input id="open-angle" type="range" min="0" max="180" step="1" value="92">
+            <input id="open-angle-number" type="number" min="0" max="180" step="1" value="92" aria-label="投喂位置角度">
+          </label>
+          <label class="continuous-field">
+            <span>连续舵机每次转动角度 <output id="turn-degrees-output">180°</output></span>
+            <input id="turn-degrees" type="range" min="1" max="360" step="1" value="180">
+            <input id="turn-degrees-number" type="number" min="1" max="360" step="1" value="180" aria-label="连续舵机转动角度">
+          </label>
+          <label class="continuous-field">
+            <span>连续舵机一圈耗时（毫秒）</span>
+            <input id="ms-per-rev" type="number" min="250" max="10000" step="10" value="2000" required>
+          </label>
+          <details class="advanced-config continuous-field">
+            <summary>连续舵机方向/停止校准</summary>
+            <div class="advanced-grid">
+              <label><span>正转脉宽</span><input id="forward-us" type="number" min="1000" max="2000" step="1" value="1700"></label>
+              <label><span>反转脉宽</span><input id="reverse-us" type="number" min="1000" max="2000" step="1" value="1300"></label>
+              <label><span>停止脉宽</span><input id="stop-us" type="number" min="1400" max="1600" step="1" value="1500"></label>
+              <label><span>投喂方向</span><select id="continuous-direction"><option value="0">正转</option><option value="1">反转</option></select></label>
+              <label><span>动作完成后</span><select id="continuous-return"><option value="0">单向转动后停止</option><option value="1">反转回位后停止</option></select></label>
+            </div>
+          </details>
+          <label>
+            <span>两次投喂最短间隔（秒）</span>
+            <input id="min-interval" type="number" min="10" max="86400" step="1" value="60" required>
+          </label>
+          <label>
+            <span>每日最多投喂次数</span>
+            <input id="max-feeds" type="number" min="1" max="100" step="1" value="8" required>
+          </label>
+          <label>
+            <span>每日最多投喂份量</span>
+            <input id="max-portions" type="number" min="1" max="300" step="1" value="12" required>
+          </label>
+          <p class="config-derived" id="travel-summary">当前实际转动行程：<strong id="travel-angle">80°</strong></p>
+          <div class="device-config-actions">
+            <button id="save-device-config" class="button button-primary" type="submit" disabled>保存到投喂器</button>
+            <button id="reset-device-config" class="button button-secondary" type="button" disabled>填入默认值</button>
+          </div>
+          <p id="device-config-error" class="settings-error" role="alert"></p>
+        </form>
       </section>
 
       <section class="history-panel" aria-labelledby="history-title">

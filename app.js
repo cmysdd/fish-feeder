@@ -20,6 +20,10 @@ const state = {
   pendingScheduleId: "",
   pendingScheduleExpiresAt: 0,
   pendingSchedules: null,
+  pendingConfigId: "",
+  pendingConfigExpiresAt: 0,
+  deviceConfigDirty: false,
+  deviceConfigSupported: false,
   editingScheduleIndex: -1,
   telemetry: null,
   history: loadHistory()
@@ -48,9 +52,37 @@ const els = {
   firmware: $("firmware"),
   clockState: $("clock-state"),
   dailyPortions: $("daily-portions"),
+  dailyFeeds: $("daily-feeds"),
   lastFeed: $("last-feed"),
   lastFeedSource: $("last-feed-source"),
   lastError: $("last-error"),
+  configStatus: $("config-status"),
+  deviceConfigForm: $("device-config-form"),
+  servoMode: $("servo-mode"),
+  continuousHelp: $("continuous-help"),
+  positionalHelp: $("positional-help"),
+  closedAngle: $("closed-angle"),
+  closedAngleNumber: $("closed-angle-number"),
+  closedAngleOutput: $("closed-angle-output"),
+  openAngle: $("open-angle"),
+  openAngleNumber: $("open-angle-number"),
+  openAngleOutput: $("open-angle-output"),
+  travelAngle: $("travel-angle"),
+  turnDegrees: $("turn-degrees"),
+  turnDegreesNumber: $("turn-degrees-number"),
+  turnDegreesOutput: $("turn-degrees-output"),
+  msPerRev: $("ms-per-rev"),
+  forwardUs: $("forward-us"),
+  reverseUs: $("reverse-us"),
+  stopUs: $("stop-us"),
+  continuousDirection: $("continuous-direction"),
+  continuousReturn: $("continuous-return"),
+  minInterval: $("min-interval"),
+  maxFeeds: $("max-feeds"),
+  maxPortions: $("max-portions"),
+  saveDeviceConfig: $("save-device-config"),
+  resetDeviceConfig: $("reset-device-config"),
+  deviceConfigError: $("device-config-error"),
   addSchedule: $("add-schedule"),
   scheduleList: $("schedule-list"),
   scheduleDialog: $("schedule-dialog"),
@@ -98,7 +130,10 @@ const reasonLabels = {
   schedule_cooldown: "定时任务因安全间隔被跳过",
   schedule_daily_limit: "定时任务因 24 小时上限被跳过",
   clock_not_ready: "设备时间未同步",
-  servo_failed: "舵机动作失败"
+  servo_failed: "舵机动作失败",
+  config_updated: "设备参数已更新",
+  invalid_config: "设备参数超出范围",
+  stale_config: "另一台手机已保存更新的参数，请刷新后重试"
 };
 
 function safeStorageGet(storage, key) {
@@ -235,9 +270,10 @@ function randomSecret() {
 async function signCommand(command, secret) {
   if (!crypto.subtle) throw new Error("当前浏览器不支持安全签名，请使用最新版 Chrome、Edge 或 Safari");
   const encoder = new TextEncoder();
-  const canonical = command.action === "set_schedule"
-    ? [command.v, command.id, command.action, command.schedule_data, command.issued_at, command.expires_at].join("|")
-    : [command.v, command.id, command.action, command.portion, command.issued_at, command.expires_at].join("|");
+  const data = command.action === "set_schedule" ? command.schedule_data
+    : command.action === "set_config" ? command.config_data
+    : command.portion;
+  const canonical = [command.v, command.id, command.action, data, command.issued_at, command.expires_at].join("|");
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(secret),
@@ -397,12 +433,16 @@ function renderTelemetry(payload) {
   els.freeHeap.textContent = Number.isFinite(Number(payload.free_heap)) ? `${payload.free_heap} B` : "--";
   els.firmware.textContent = payload.firmware || "--";
   els.clockState.textContent = payload.clock_ready === true ? "已同步（北京时间）" : "同步中";
-  els.dailyPortions.textContent = Number.isFinite(Number(payload.portions_24h)) ? `${payload.portions_24h} 份` : "--";
+  els.dailyPortions.textContent = Number.isFinite(Number(payload.portions_24h))
+    ? `${payload.portions_24h}/${payload.max_portions_24h || "--"} 份` : "--";
+  els.dailyFeeds.textContent = Number.isFinite(Number(payload.feeds_24h))
+    ? `${payload.feeds_24h}/${payload.max_feeds_24h || "--"} 次` : "--";
   els.lastFeed.textContent = payload.last_feed_at ? formatTime(payload.last_feed_at, true) : "暂无";
   els.lastFeedSource.textContent = payload.last_feed_source === "schedule"
     ? "定时计划"
     : payload.last_feed_source === "manual" ? "手机手动" : "--";
   els.lastError.textContent = reasonLabels[payload.last_error] || payload.last_error || "运行正常";
+  setDeviceConfigForm(payload);
   els.openDeviceWifi.disabled = !payload.config_url;
   els.openDeviceWifi.title = payload.config_url
     ? "需要手机和设备处于同一个家庭 Wi-Fi"
@@ -412,6 +452,106 @@ function renderTelemetry(payload) {
     : "设备在线后，这里会显示局域网 Wi-Fi 设置入口。";
   renderSchedules(Array.isArray(payload.schedules) ? payload.schedules : []);
   updateControls();
+}
+
+function setDeviceConfigForm(payload = {}) {
+  state.deviceConfigSupported = Object.prototype.hasOwnProperty.call(payload, "servo_mode");
+  if (state.deviceConfigDirty || state.pendingConfigId) return;
+  const mode = clampInteger(payload.servo_mode, 0, 1, 1);
+  const closed = clampInteger(payload.servo_closed_angle, 0, 180, 12);
+  const open = clampInteger(payload.servo_open_angle, 0, 180, 92);
+  const turnDegrees = clampInteger(payload.continuous_turn_degrees, 1, 360, 180);
+  const msPerRev = clampInteger(payload.continuous_ms_per_rev, 250, 10000, 2000);
+  const forwardUs = clampInteger(payload.continuous_forward_us, 1000, 2000, 1700);
+  const reverseUs = clampInteger(payload.continuous_reverse_us, 1000, 2000, 1300);
+  const stopUs = clampInteger(payload.continuous_stop_us, 1400, 1600, 1500);
+  const direction = clampInteger(payload.continuous_direction, 0, 1, 0);
+  const continuousReturn = payload.continuous_return === true || payload.continuous_return === 1 ? 1 : 0;
+  els.servoMode.value = String(mode);
+  const interval = clampInteger(payload.min_interval_seconds, 10, 86400, 60);
+  const maxFeeds = clampInteger(payload.max_feeds_24h, 1, 100, 8);
+  const maxPortions = clampInteger(payload.max_portions_24h, 1, 300, 12);
+  syncAngleInput("closed", closed);
+  syncAngleInput("open", open);
+  syncTurnDegrees(turnDegrees);
+  els.msPerRev.value = String(msPerRev);
+  els.forwardUs.value = String(forwardUs);
+  els.reverseUs.value = String(reverseUs);
+  els.stopUs.value = String(stopUs);
+  els.continuousDirection.value = String(direction);
+  els.continuousReturn.value = String(continuousReturn);
+  els.minInterval.value = String(interval);
+  els.maxFeeds.value = String(maxFeeds);
+  els.maxPortions.value = String(maxPortions);
+  els.configStatus.textContent = state.pendingConfigId ? "正在保存…" : (state.deviceConfigSupported ? "已读取设备参数" : "请升级固件到1.3.0");
+  els.saveDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
+  els.resetDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
+  updateServoModeVisibility();
+}
+
+function clampInteger(value, min, max, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) ? Math.max(min, Math.min(max, number)) : fallback;
+}
+
+function syncAngleInput(name, value) {
+  const range = els[`${name}Angle`];
+  const number = els[`${name}AngleNumber`];
+  const output = els[`${name}AngleOutput`];
+  range.value = String(value);
+  number.value = String(value);
+  output.textContent = `${value}°`;
+  if (els.travelAngle && els.closedAngle && els.openAngle) {
+    els.travelAngle.textContent = `${Math.abs(Number(els.openAngle.value) - Number(els.closedAngle.value))}°`;
+  }
+}
+
+function bindAngleInputs(name) {
+  const range = els[`${name}Angle`];
+  const number = els[`${name}AngleNumber`];
+  const output = els[`${name}AngleOutput`];
+  const update = (value) => {
+    const next = clampInteger(value, 0, 180, Number(range.value));
+    range.value = String(next);
+    number.value = String(next);
+    output.textContent = `${next}°`;
+    state.deviceConfigDirty = true;
+    updateServoModeVisibility();
+  };
+  range.addEventListener("input", () => update(range.value));
+  number.addEventListener("input", () => update(number.value));
+}
+
+function syncTurnDegrees(value) {
+  els.turnDegrees.value = String(value);
+  els.turnDegreesNumber.value = String(value);
+  els.turnDegreesOutput.textContent = `${value}°`;
+}
+
+function updateServoModeVisibility() {
+  const continuous = els.servoMode.value === "1";
+  document.querySelectorAll(".continuous-field").forEach((element) => {
+    element.hidden = !continuous;
+  });
+  document.querySelectorAll(".positional-field").forEach((element) => {
+    element.hidden = continuous;
+  });
+  els.continuousHelp.hidden = !continuous;
+  els.positionalHelp.hidden = continuous;
+  els.travelAngle.textContent = continuous
+    ? `${els.turnDegrees.value}°（按耗时估算）`
+    : `${Math.abs(Number(els.openAngle.value) - Number(els.closedAngle.value))}°`;
+}
+
+function bindTurnDegrees() {
+  const update = (value) => {
+    const next = clampInteger(value, 1, 360, Number(els.turnDegrees.value));
+    syncTurnDegrees(next);
+    state.deviceConfigDirty = true;
+    updateServoModeVisibility();
+  };
+  els.turnDegrees.addEventListener("input", () => update(els.turnDegrees.value));
+  els.turnDegreesNumber.addEventListener("input", () => update(els.turnDegreesNumber.value));
 }
 
 function normalizeSchedule(value) {
@@ -574,6 +714,28 @@ function handleAcknowledgement(payload) {
   if (!payload.id) return;
   const status = payload.status || "failed";
 
+  if (payload.action === "set_config" || payload.id === state.pendingConfigId) {
+    if (payload.id !== state.pendingConfigId) return;
+    if (status === "completed" || status === "duplicate") {
+      state.pendingConfigId = "";
+      state.pendingConfigExpiresAt = 0;
+      state.deviceConfigDirty = false;
+      els.deviceConfigError.textContent = "";
+      els.configStatus.textContent = "已保存到投喂器";
+      showToast("投喂参数已保存");
+      requestState();
+    } else if (status !== "processing") {
+      state.pendingConfigId = "";
+      state.pendingConfigExpiresAt = 0;
+      const message = reasonLabels[payload.reason] || payload.reason || "参数保存失败";
+      els.deviceConfigError.textContent = message;
+      els.configStatus.textContent = "保存失败";
+      showToast(message, "error");
+    }
+    updateControls();
+    return;
+  }
+
   if (payload.action === "set_schedule" || payload.id === state.pendingScheduleId) {
     if (payload.id !== state.pendingScheduleId) return;
     if (status === "completed" || status === "duplicate") {
@@ -675,12 +837,20 @@ function updateControls() {
   const cooldown = cooldownRemaining();
   const pending = Boolean(state.pendingId);
   const scheduleBusy = Boolean(state.pendingScheduleId);
-  const ready = state.brokerConnected && state.deviceOnline && !pending && cooldown === 0;
+  const dailyFeeds = Number(state.telemetry?.feeds_24h || 0);
+  const dailyPortions = Number(state.telemetry?.portions_24h || 0);
+  const maxFeeds = Number(state.telemetry?.max_feeds_24h || 0);
+  const maxPortions = Number(state.telemetry?.max_portions_24h || 0);
+  const dailyBlocked = (maxFeeds > 0 && dailyFeeds >= maxFeeds) ||
+    (maxPortions > 0 && dailyPortions + state.portion > maxPortions);
+  const ready = state.brokerConnected && state.deviceOnline && !pending && cooldown === 0 && !dailyBlocked;
   els.feedButton.disabled = !ready;
   els.refreshState.disabled = !state.brokerConnected;
   els.openDeviceWifi.disabled = !state.brokerConnected || !state.deviceOnline || !state.telemetry?.config_url;
   els.addSchedule.disabled = !state.brokerConnected || !state.deviceOnline || scheduleBusy || currentSchedules().length >= MAX_SCHEDULES;
   els.saveSchedule.disabled = scheduleBusy || !state.brokerConnected || !state.deviceOnline;
+  els.saveDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
+  els.resetDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   document.querySelectorAll(".schedule-actions .button").forEach((button) => {
     button.disabled = !state.brokerConnected || !state.deviceOnline || scheduleBusy;
   });
@@ -701,10 +871,81 @@ function updateControls() {
     els.feedButtonTitle.textContent = "冷却中";
     els.feedButtonNote.textContent = `${cooldown} 秒后可再次投喂`;
     els.cooldownLabel.textContent = `安全间隔 ${cooldown} 秒`;
+  } else if (dailyBlocked) {
+    els.feedButtonTitle.textContent = "达到每日上限";
+    els.feedButtonNote.textContent = "请等待24小时窗口滚动后再投喂";
+    els.cooldownLabel.textContent = `今日 ${dailyFeeds}/${maxFeeds || "--"} 次`;
   } else {
     els.feedButtonTitle.textContent = `投喂 ${state.portion} 份`;
     els.feedButtonNote.textContent = "点击后需要再次确认";
     els.cooldownLabel.textContent = "设备可以执行";
+  }
+}
+
+function readDeviceConfigForm() {
+  const mode = clampInteger(els.servoMode.value, 0, 1, 1);
+  const closed = clampInteger(els.closedAngleNumber.value, 0, 180, 12);
+  const open = clampInteger(els.openAngleNumber.value, 0, 180, 92);
+  const turnDegrees = clampInteger(els.turnDegreesNumber.value, 1, 360, 180);
+  const msPerRev = clampInteger(els.msPerRev.value, 250, 10000, 2000);
+  const forwardUs = clampInteger(els.forwardUs.value, 1000, 2000, 1700);
+  const reverseUs = clampInteger(els.reverseUs.value, 1000, 2000, 1300);
+  const stopUs = clampInteger(els.stopUs.value, 1400, 1600, 1500);
+  const direction = clampInteger(els.continuousDirection.value, 0, 1, 0);
+  const continuousReturn = clampInteger(els.continuousReturn.value, 0, 1, 0);
+  const minInterval = clampInteger(els.minInterval.value, 10, 86400, 60);
+  const maxFeeds = clampInteger(els.maxFeeds.value, 1, 100, 8);
+  const maxPortions = clampInteger(els.maxPortions.value, 1, 300, 12);
+  if (mode === 0 && closed === open) throw new Error("180°模式下，关闭位置和投喂位置不能相同。");
+  if (mode === 1 && Math.abs(forwardUs - stopUs) < 20) throw new Error("正转脉宽与停止脉宽过于接近，连续舵机可能不会转动。");
+  return { mode, closed, open, turnDegrees, msPerRev, forwardUs, reverseUs, stopUs, direction, continuousReturn, minInterval, maxFeeds, maxPortions };
+}
+
+async function sendDeviceConfig(values) {
+  if (!state.client || !state.config || !state.brokerConnected || !state.deviceOnline || state.pendingConfigId) return;
+  const now = Math.floor(Date.now() / 1000);
+  const command = {
+    v: 1,
+    id: randomId(),
+    action: "set_config",
+    config_data: [
+      values.mode,
+      values.closed,
+      values.open,
+      values.turnDegrees,
+      values.msPerRev,
+      values.forwardUs,
+      values.reverseUs,
+      values.stopUs,
+      values.direction,
+      values.continuousReturn,
+      values.minInterval,
+      values.maxPortions,
+      values.maxFeeds
+    ].join(","),
+    issued_at: now,
+    expires_at: now + COMMAND_VALID_SECONDS
+  };
+  try {
+    command.sig = await signCommand(command, state.config.commandSecret);
+    state.pendingConfigId = command.id;
+    state.pendingConfigExpiresAt = (command.expires_at + 5) * 1000;
+    els.deviceConfigError.textContent = "";
+    els.configStatus.textContent = "正在保存…";
+    updateControls();
+    state.client.publish(topic("feeder_cmd"), JSON.stringify(command), { qos: 1, retain: false }, (error) => {
+      if (!error) return;
+      state.pendingConfigId = "";
+      state.pendingConfigExpiresAt = 0;
+      els.deviceConfigError.textContent = `发送失败：${error.message}`;
+      els.configStatus.textContent = "发送失败";
+      updateControls();
+    });
+  } catch (error) {
+    state.pendingConfigId = "";
+    state.pendingConfigExpiresAt = 0;
+    els.deviceConfigError.textContent = error.message;
+    updateControls();
   }
 }
 
@@ -788,6 +1029,41 @@ async function sendScheduleUpdate(values) {
 }
 
 function bindEvents() {
+  bindAngleInputs("closed");
+  bindAngleInputs("open");
+  bindTurnDegrees();
+  updateServoModeVisibility();
+  els.servoMode.addEventListener("change", () => {
+    state.deviceConfigDirty = true;
+    updateServoModeVisibility();
+  });
+  els.deviceConfigForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      sendDeviceConfig(readDeviceConfigForm());
+    } catch (error) {
+      els.deviceConfigError.textContent = error.message;
+    }
+  });
+  els.resetDeviceConfig.addEventListener("click", () => {
+    state.deviceConfigDirty = true;
+    els.servoMode.value = "1";
+    syncAngleInput("closed", 12);
+    syncAngleInput("open", 92);
+    syncTurnDegrees(180);
+    els.msPerRev.value = "2000";
+    els.forwardUs.value = "1700";
+    els.reverseUs.value = "1300";
+    els.stopUs.value = "1500";
+    els.continuousDirection.value = "0";
+    els.continuousReturn.value = "0";
+    els.minInterval.value = "60";
+    els.maxFeeds.value = "8";
+    els.maxPortions.value = "12";
+    updateServoModeVisibility();
+    els.deviceConfigError.textContent = "已填入默认值，点击“保存到投喂器”后才会生效。";
+  });
+
   document.querySelectorAll(".portion-button").forEach((button) => {
     button.addEventListener("click", () => {
       state.portion = Number(button.dataset.portion);
@@ -955,6 +1231,12 @@ function tick() {
     state.pendingSchedules = null;
     renderSchedules();
     showToast("设备没有确认计划，请检查连接后重试", "error");
+  }
+  if (state.pendingConfigId && Date.now() > state.pendingConfigExpiresAt) {
+    state.pendingConfigId = "";
+    state.pendingConfigExpiresAt = 0;
+    els.configStatus.textContent = "设备未确认，请检查连接";
+    els.deviceConfigError.textContent = "设备没有确认参数，请检查连接后重试。";
   }
   updateControls();
 }
