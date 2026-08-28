@@ -191,7 +191,7 @@ v|id|set_config|config_data|issued_at|expires_at
   "v": 1,
   "online": true,
   "device_id": "feeder-001",
-  "firmware": "1.3.0",
+  "firmware": "1.3.1",
   "rssi": -58,
   "wifi_ssid": "home-2.4g",
   "ip": "192.168.1.88",
