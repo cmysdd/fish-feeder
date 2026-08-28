@@ -707,8 +707,28 @@ void processConfigCommand(JsonDocument &document) {
   const int matched = sscanf(configData.c_str(), "%d,%d,%d,%d,%lu,%d,%d,%d,%d,%d,%lu,%d,%d%c",
     &mode, &closedAngle, &openAngle, &turnDegrees, &msPerRev, &forwardUs, &reverseUs, &stopUs,
     &direction, &continuousReturn, &minInterval, &maxPortions, &maxFeeds, &extra);
+  int parsedFields = matched;
+  if (parsedFields != 13) {
+    mode = 0;
+    closedAngle = 0;
+    openAngle = 0;
+    turnDegrees = 0;
+    msPerRev = 0;
+    forwardUs = 0;
+    reverseUs = 0;
+    stopUs = 0;
+    direction = 0;
+    continuousReturn = 0;
+    minInterval = 0;
+    maxPortions = 0;
+    maxFeeds = 0;
+    extra = '\0';
+    parsedFields = sscanf(configData.c_str(), "%d,%d,%d,%d,%lu,%d,%d,%d,%d,%lu,%d,%d%c",
+      &mode, &closedAngle, &openAngle, &turnDegrees, &msPerRev, &forwardUs, &reverseUs, &stopUs,
+      &direction, &minInterval, &maxPortions, &maxFeeds, &extra);
+  }
   if (
-    matched != 13 ||
+    (parsedFields != 13 && parsedFields != 12) ||
     (mode != 0 && mode != 1) ||
     closedAngle < 0 || closedAngle > 180 ||
     openAngle < 0 || openAngle > 180 || (mode == 0 && closedAngle == openAngle) ||
