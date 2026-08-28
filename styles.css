@@ -237,6 +237,21 @@ section {
 
 .device-config-actions .button { flex: 1; }
 
+.device-test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.device-test-row .button { flex: 0 0 auto; }
+
+.field-hint {
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.45;
+}
+
 .config-derived {
   grid-column: 1 / -1;
   margin: -4px 0 0;
@@ -718,6 +733,7 @@ noscript {
 @media (max-width: 680px) {
   .device-config-form { grid-template-columns: 1fr; }
   .device-config-actions { align-items: stretch; }
+  .device-test-row { align-items: stretch; flex-direction: column; }
   .advanced-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .app-header { min-height: 78px; padding: 15px 14px; }
   .brand-mark { width: 38px; height: 38px; }

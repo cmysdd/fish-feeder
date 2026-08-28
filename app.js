@@ -22,6 +22,8 @@ const state = {
   pendingSchedules: null,
   pendingConfigId: "",
   pendingConfigExpiresAt: 0,
+  pendingServoTestId: "",
+  pendingServoTestExpiresAt: 0,
   deviceConfigDirty: false,
   deviceConfigSupported: false,
   editingScheduleIndex: -1,
@@ -82,6 +84,8 @@ const els = {
   maxPortions: $("max-portions"),
   saveDeviceConfig: $("save-device-config"),
   resetDeviceConfig: $("reset-device-config"),
+  testServo: $("test-servo"),
+  servoTestStatus: $("servo-test-status"),
   deviceConfigError: $("device-config-error"),
   addSchedule: $("add-schedule"),
   scheduleList: $("schedule-list"),
@@ -133,7 +137,8 @@ const reasonLabels = {
   servo_failed: "舵机动作失败",
   config_updated: "设备参数已更新",
   invalid_config: "设备参数超出范围",
-  stale_config: "另一台手机已保存更新的参数，请刷新后重试"
+  stale_config: "另一台手机已保存更新的参数，请刷新后重试",
+  servo_test_completed: "舵机测试动作完成"
 };
 
 function safeStorageGet(storage, key) {
@@ -483,9 +488,11 @@ function setDeviceConfigForm(payload = {}) {
   els.minInterval.value = String(interval);
   els.maxFeeds.value = String(maxFeeds);
   els.maxPortions.value = String(maxPortions);
-  els.configStatus.textContent = state.pendingConfigId ? "正在保存…" : (state.deviceConfigSupported ? "已读取设备参数" : "请升级固件到1.3.0");
+  els.configStatus.textContent = state.pendingConfigId ? "正在保存…" : (state.deviceConfigSupported ? "已读取设备参数" : "请升级固件到1.4.0");
   els.saveDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   els.resetDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
+  els.testServo.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId) || Boolean(state.pendingServoTestId);
+  els.servoTestStatus.textContent = state.pendingServoTestId ? "设备正在执行测试…" : "保存参数后可空载测试一次";
   updateServoModeVisibility();
 }
 
@@ -714,6 +721,28 @@ function handleAcknowledgement(payload) {
   if (!payload.id) return;
   const status = payload.status || "failed";
 
+  if (payload.id === state.pendingServoTestId) {
+    if (status === "processing") {
+      els.servoTestStatus.textContent = "设备正在执行测试…";
+      setActionMessage("设备已接收舵机测试，请观察舵机动作。", "success");
+    } else {
+      state.pendingServoTestId = "";
+      state.pendingServoTestExpiresAt = 0;
+      const message = reasonLabels[payload.reason] || payload.reason || (status === "completed" ? "舵机测试动作完成" : "舵机测试失败");
+      els.servoTestStatus.textContent = status === "completed" ? "测试完成" : `测试${status === "duplicate" ? "已去重" : "失败"}`;
+      if (status === "completed" || status === "duplicate") {
+        setActionMessage(message, "success");
+        showToast(message);
+      } else {
+        els.deviceConfigError.textContent = message;
+        setActionMessage(message, "error");
+        showToast(message, "error");
+      }
+      updateControls();
+    }
+    return;
+  }
+
   if (payload.action === "set_config" || payload.id === state.pendingConfigId) {
     if (payload.id !== state.pendingConfigId) return;
     if (status === "completed" || status === "duplicate") {
@@ -851,6 +880,7 @@ function updateControls() {
   els.saveSchedule.disabled = scheduleBusy || !state.brokerConnected || !state.deviceOnline;
   els.saveDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   els.resetDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
+  els.testServo.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId) || Boolean(state.pendingServoTestId);
   document.querySelectorAll(".schedule-actions .button").forEach((button) => {
     button.disabled = !state.brokerConnected || !state.deviceOnline || scheduleBusy;
   });
@@ -944,6 +974,46 @@ async function sendDeviceConfig(values) {
   } catch (error) {
     state.pendingConfigId = "";
     state.pendingConfigExpiresAt = 0;
+    els.deviceConfigError.textContent = error.message;
+    updateControls();
+  }
+}
+
+async function sendServoTestCommand() {
+  if (!state.client || !state.config || !state.brokerConnected || !state.deviceOnline ||
+      !state.deviceConfigSupported || state.pendingServoTestId || state.pendingConfigId) return;
+  if (!window.confirm("确认空载测试当前舵机？测试不会计入投喂次数，但舵机会执行一次动作。")) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const command = {
+    v: 1,
+    id: randomId(),
+    action: "servo_test",
+    portion: 1,
+    issued_at: now,
+    expires_at: now + COMMAND_VALID_SECONDS
+  };
+
+  try {
+    command.sig = await signCommand(command, state.config.commandSecret);
+    state.pendingServoTestId = command.id;
+    state.pendingServoTestExpiresAt = (command.expires_at + 5) * 1000;
+    els.servoTestStatus.textContent = "正在发送测试命令…";
+    els.deviceConfigError.textContent = "";
+    updateControls();
+    state.client.publish(topic("feeder_cmd"), JSON.stringify(command), { qos: 1, retain: false }, (error) => {
+      if (!error) return;
+      state.pendingServoTestId = "";
+      state.pendingServoTestExpiresAt = 0;
+      els.servoTestStatus.textContent = "测试发送失败";
+      els.deviceConfigError.textContent = `发送失败：${error.message}`;
+      showToast(`舵机测试发送失败：${error.message}`, "error");
+      updateControls();
+    });
+  } catch (error) {
+    state.pendingServoTestId = "";
+    state.pendingServoTestExpiresAt = 0;
+    els.servoTestStatus.textContent = "测试发送失败";
     els.deviceConfigError.textContent = error.message;
     updateControls();
   }
@@ -1045,6 +1115,7 @@ function bindEvents() {
       els.deviceConfigError.textContent = error.message;
     }
   });
+  els.testServo.addEventListener("click", sendServoTestCommand);
   els.resetDeviceConfig.addEventListener("click", () => {
     state.deviceConfigDirty = true;
     els.servoMode.value = "1";
@@ -1237,6 +1308,12 @@ function tick() {
     state.pendingConfigExpiresAt = 0;
     els.configStatus.textContent = "设备未确认，请检查连接";
     els.deviceConfigError.textContent = "设备没有确认参数，请检查连接后重试。";
+  }
+  if (state.pendingServoTestId && Date.now() > state.pendingServoTestExpiresAt) {
+    state.pendingServoTestId = "";
+    state.pendingServoTestExpiresAt = 0;
+    els.servoTestStatus.textContent = "设备未确认测试，请检查连接";
+    els.deviceConfigError.textContent = "设备没有确认舵机测试，请先请求状态并检查固件版本。";
   }
   updateControls();
 }

@@ -27,7 +27,7 @@ static_assert(
   "MIN_FEED_INTERVAL_SECONDS must be at least COMMAND_MAX_AGE_SECONDS."
 );
 
-static const char *FIRMWARE_VERSION = "1.3.1";
+static const char *FIRMWARE_VERSION = "1.4.0";
 static const uint32_t SAFETY_MAGIC = 0x46454547UL;
 static const uint32_t WIFI_CONFIG_MAGIC = 0x57494649UL;
 static const uint32_t DOUBLE_RESET_MAGIC = 0x44525354UL;
@@ -99,6 +99,7 @@ String onlineTopic;
 String queryTopic;
 String lastError;
 String lastFeedSource;
+String lastServoTestCommandId;
 
 uint32_t lastMqttAttemptAt = 0;
 uint32_t lastStatePublishAt = 0;
@@ -441,8 +442,18 @@ void waitWithMqtt(uint32_t durationMs) {
 }
 
 bool runServoCycles(int portion) {
+  Serial.printf(
+    "Servo sequence: mode=%u portion=%d closed=%u open=%u\n",
+    safetyState.servoMode,
+    portion,
+    safetyState.servoClosedAngle,
+    safetyState.servoOpenAngle
+  );
   feederServo.attach(SERVO_PIN, 500, 2400);
-  if (!feederServo.attached()) return false;
+  if (!feederServo.attached()) {
+    Serial.println("Servo attach failed");
+    return false;
+  }
 
   if (safetyState.servoMode == 1) {
     if (safetyState.continuousTurnDegrees == 0) {
@@ -489,6 +500,7 @@ bool runServoCycles(int portion) {
     waitWithMqtt(SERVO_SETTLE_MS);
   }
   feederServo.detach();
+  Serial.println("Servo sequence completed");
   return true;
 }
 
@@ -743,6 +755,7 @@ void processConfigCommand(JsonDocument &document) {
     maxPortions < 1 || maxPortions > 300 ||
     maxFeeds < 1 || maxFeeds > 100
   ) {
+    Serial.printf("Config rejected: %s\n", configData.c_str());
     rejectConfigCommand(commandId, "invalid_config");
     return;
   }
@@ -765,8 +778,70 @@ void processConfigCommand(JsonDocument &document) {
   commandId.toCharArray(safetyState.lastConfigCommandId, sizeof(safetyState.lastConfigCommandId));
   saveSafetyState();
 
+  Serial.printf(
+    "Config updated: mode=%u closed=%u open=%u\n",
+    safetyState.servoMode,
+    safetyState.servoClosedAngle,
+    safetyState.servoOpenAngle
+  );
+
   lastError = "";
   publishAcknowledgement(commandId, "completed", 0, "config_updated", "set_config");
+  publishState();
+}
+
+void processServoTestCommand(JsonDocument &document) {
+  const int version = document["v"] | 0;
+  const String commandId = document["id"] | "";
+  const String action = document["action"] | "";
+  const int portion = document["portion"] | 1;
+  const uint32_t issuedAt = document["issued_at"] | 0;
+  const uint32_t expiresAt = document["expires_at"] | 0;
+  const String receivedSignature = document["sig"] | "";
+
+  if (version != 1 || !validCommandId(commandId) || action != "servo_test" || portion != 1) {
+    rejectCommand(commandId, portion, "invalid_payload");
+    return;
+  }
+  if (!clockReady()) {
+    rejectCommand(commandId, portion, "clock_not_ready");
+    return;
+  }
+
+  const uint32_t now = epochNow();
+  if (!validCommandTime(issuedAt, expiresAt, now)) {
+    rejectCommand(commandId, portion, "command_expired");
+    return;
+  }
+
+  const String canonical = String(version) + "|" + commandId + "|" + action + "|" +
+    String(portion) + "|" + String(issuedAt) + "|" + String(expiresAt);
+  if (!constantTimeEquals(receivedSignature, hmacSha256(COMMAND_SECRET, canonical))) {
+    rejectCommand(commandId, portion, "invalid_signature");
+    return;
+  }
+  if (commandId.equals(lastServoTestCommandId)) {
+    publishAcknowledgement(commandId, "duplicate", portion, "duplicate_command", "servo_test");
+    return;
+  }
+  lastServoTestCommandId = commandId;
+
+  Serial.printf(
+    "Servo test requested: mode=%u closed=%u open=%u\n",
+    safetyState.servoMode,
+    safetyState.servoClosedAngle,
+    safetyState.servoOpenAngle
+  );
+  publishAcknowledgement(commandId, "processing", portion, "", "servo_test");
+  const bool completed = runServoCycles(1);
+  lastError = completed ? "" : "servo_failed";
+  publishAcknowledgement(
+    commandId,
+    completed ? "completed" : "failed",
+    portion,
+    completed ? "servo_test_completed" : "servo_failed",
+    "servo_test"
+  );
   publishState();
 }
 
@@ -936,6 +1011,8 @@ void onMqttMessage(char *incomingTopic, byte *payload, unsigned int length) {
   const String action = document["action"] | "";
   if (action == "feed") {
     processFeedCommand(document);
+  } else if (action == "servo_test") {
+    processServoTestCommand(document);
   } else if (action == "set_schedule") {
     processScheduleCommand(document);
   } else if (action == "set_config") {
