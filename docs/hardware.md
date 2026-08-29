@@ -92,21 +92,24 @@ ESP8266 的 3.3V GPIO 信号通常可以直接控制 MG90S，但不能使用 ESP
 固件默认值（也可以在网页“投喂参数”中修改并保存到设备）：
 
 ```cpp
-#define SERVO_CLOSED_ANGLE 12
-#define SERVO_OPEN_ANGLE 92
+#define SERVO_CLOSED_ANGLE 90
+#define SERVO_OPEN_ANGLE 180
 #define SERVO_OPEN_MS 550
 #define SERVO_SETTLE_MS 450
 #define SERVO_MODE_DEFAULT 1
-#define SERVO_CONTINUOUS_TURN_DEGREES 180
-#define SERVO_CONTINUOUS_MS_PER_REV 2000UL
+#define SERVO_POSITIONAL_MOVE_MS 1000UL
+#define SERVO_ACTION_PAUSE_MS 1000UL
+#define SERVO_POSITIONAL_RETURN_MS 1000UL
+#define SERVO_CONTINUOUS_TURN_DEGREES 90
+#define SERVO_CONTINUOUS_MS_PER_REV 4000UL
 #define SERVO_CONTINUOUS_FORWARD_US 1700
 #define SERVO_CONTINUOUS_REVERSE_US 1300
 #define SERVO_CONTINUOUS_STOP_US 1500
 ```
 
-网页默认使用360°连续旋转模式。连续舵机不能知道绝对角度，固件用“一圈耗时”估算转动角度：运行时间 = 目标角度 ÷ 360 × 一圈耗时。每份动作默认单向转动后停止，也可以在网页选择反转相同时间回位。首次安装必须用少量鱼粮校准，记录从关闭位置到出粮位置需要多少度/毫秒。正转、反转、停止脉宽也可在网页高级设置中校准。切换到180°定位模式后，才使用关闭位置和投喂位置的0～180°角度。两种模式共用同一PWM信号线和MQTT协议。
+网页默认使用360°连续旋转模式。连续舵机不能知道绝对角度，固件用“一圈耗时”估算角度：单程时间 = 目标角度 ÷ 360 × 一圈耗时；到位停止并停留后，可反向运行相同时间回位。180°定位模式使用“起始位置 + 方向 + 相对角度”，并以小步插值控制去程和回程时间。顺逆时针会受舵机安装方向影响，首次必须空载确认。
 
-当前固件在180°模式使用1000～2000us的保守定位脉宽，避免部分SG90克隆舵机在过宽脉冲范围下异常。如果网页测试仍完全没有动作，烧录 `firmware/servo_diagnostic/servo_diagnostic.ino`。该程序不连接Wi-Fi或MixIO，会让D1在1000、1500、2000us之间循环。诊断程序也不动时，应更换舵机或检查红线5V、棕/黑线GND、橙/黄线D1和电源共地。
+当前固件在180°模式使用500～2400us定位脉宽，以覆盖常见SG90的完整机械行程。保存180°模式参数时，设备会立即移动到起始位置；投喂时再执行“去程→停留→回程”。设定时间不能突破舵机自身速度上限：如果负载下90°实际至少需要1.3秒，即使网页填写1秒也无法让舵机物理上更快。如果网页测试完全没有动作，烧录 `firmware/servo_diagnostic/servo_diagnostic.ino` 排查。
 
 第一次测试时不要安装舵臂：
 

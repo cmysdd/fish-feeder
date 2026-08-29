@@ -69,6 +69,9 @@ const els = {
   openAngle: $("open-angle"),
   openAngleNumber: $("open-angle-number"),
   openAngleOutput: $("open-angle-output"),
+  positionalDirection: $("positional-direction"),
+  positionalMoveMs: $("positional-move-ms"),
+  positionalReturnMs: $("positional-return-ms"),
   travelAngle: $("travel-angle"),
   turnDegrees: $("turn-degrees"),
   turnDegreesNumber: $("turn-degrees-number"),
@@ -79,6 +82,7 @@ const els = {
   stopUs: $("stop-us"),
   continuousDirection: $("continuous-direction"),
   continuousReturn: $("continuous-return"),
+  actionPauseMs: $("action-pause-ms"),
   minInterval: $("min-interval"),
   maxFeeds: $("max-feeds"),
   maxPortions: $("max-portions"),
@@ -460,24 +464,31 @@ function renderTelemetry(payload) {
 }
 
 function setDeviceConfigForm(payload = {}) {
-  state.deviceConfigSupported = Object.prototype.hasOwnProperty.call(payload, "servo_mode");
+  state.deviceConfigSupported = Object.prototype.hasOwnProperty.call(payload, "servo_mode") &&
+    Object.prototype.hasOwnProperty.call(payload, "positional_move_ms");
   if (state.deviceConfigDirty || state.pendingConfigId) return;
   const mode = clampInteger(payload.servo_mode, 0, 1, 1);
-  const closed = clampInteger(payload.servo_closed_angle, 0, 180, 12);
-  const open = clampInteger(payload.servo_open_angle, 0, 180, 92);
-  const turnDegrees = clampInteger(payload.continuous_turn_degrees, 1, 360, 180);
-  const msPerRev = clampInteger(payload.continuous_ms_per_rev, 250, 10000, 2000);
+  const closed = clampInteger(payload.servo_closed_angle, 0, 180, 90);
+  const open = clampInteger(payload.servo_open_angle, 0, 180, 180);
+  const positionalDirection = open >= closed ? 0 : 1;
+  const positionalTravel = Math.max(1, Math.abs(open - closed));
+  const turnDegrees = clampInteger(payload.continuous_turn_degrees, 1, 360, 90);
+  const msPerRev = clampInteger(payload.continuous_ms_per_rev, 250, 10000, 4000);
   const forwardUs = clampInteger(payload.continuous_forward_us, 1000, 2000, 1700);
   const reverseUs = clampInteger(payload.continuous_reverse_us, 1000, 2000, 1300);
   const stopUs = clampInteger(payload.continuous_stop_us, 1400, 1600, 1500);
   const direction = clampInteger(payload.continuous_direction, 0, 1, 0);
   const continuousReturn = payload.continuous_return === true || payload.continuous_return === 1 ? 1 : 0;
+  const positionalMoveMs = clampInteger(payload.positional_move_ms, 100, 10000, 1000);
+  const actionPauseMs = clampInteger(payload.action_pause_ms, 0, 10000, 1000);
+  const positionalReturnMs = clampInteger(payload.positional_return_ms, 100, 10000, 1000);
   els.servoMode.value = String(mode);
   const interval = clampInteger(payload.min_interval_seconds, 10, 86400, 60);
   const maxFeeds = clampInteger(payload.max_feeds_24h, 1, 100, 8);
   const maxPortions = clampInteger(payload.max_portions_24h, 1, 300, 12);
   syncAngleInput("closed", closed);
-  syncAngleInput("open", open);
+  syncAngleInput("open", positionalTravel);
+  els.positionalDirection.value = String(positionalDirection);
   syncTurnDegrees(turnDegrees);
   els.msPerRev.value = String(msPerRev);
   els.forwardUs.value = String(forwardUs);
@@ -485,10 +496,13 @@ function setDeviceConfigForm(payload = {}) {
   els.stopUs.value = String(stopUs);
   els.continuousDirection.value = String(direction);
   els.continuousReturn.value = String(continuousReturn);
+  els.positionalMoveMs.value = String(positionalMoveMs);
+  els.actionPauseMs.value = String(actionPauseMs);
+  els.positionalReturnMs.value = String(positionalReturnMs);
   els.minInterval.value = String(interval);
   els.maxFeeds.value = String(maxFeeds);
   els.maxPortions.value = String(maxPortions);
-  els.configStatus.textContent = state.pendingConfigId ? "正在保存…" : (state.deviceConfigSupported ? "已读取设备参数" : "请升级固件到1.4.1");
+  els.configStatus.textContent = state.pendingConfigId ? "正在保存…" : (state.deviceConfigSupported ? "已读取设备参数" : "请升级固件到1.5.0");
   els.saveDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   els.resetDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   els.testServo.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId) || Boolean(state.pendingServoTestId);
@@ -508,9 +522,7 @@ function syncAngleInput(name, value) {
   range.value = String(value);
   number.value = String(value);
   output.textContent = `${value}°`;
-  if (els.travelAngle && els.closedAngle && els.openAngle) {
-    els.travelAngle.textContent = `${Math.abs(Number(els.openAngle.value) - Number(els.closedAngle.value))}°`;
-  }
+  updateServoModeVisibility();
 }
 
 function bindAngleInputs(name) {
@@ -518,7 +530,8 @@ function bindAngleInputs(name) {
   const number = els[`${name}AngleNumber`];
   const output = els[`${name}AngleOutput`];
   const update = (value) => {
-    const next = clampInteger(value, 0, 180, Number(range.value));
+    const minimum = name === "open" ? 1 : 0;
+    const next = clampInteger(value, minimum, 180, Number(range.value));
     range.value = String(next);
     number.value = String(next);
     output.textContent = `${next}°`;
@@ -527,6 +540,17 @@ function bindAngleInputs(name) {
   };
   range.addEventListener("input", () => update(range.value));
   number.addEventListener("input", () => update(number.value));
+}
+
+function positionalTargetAngle() {
+  const closed = Number(els.closedAngle.value);
+  const travel = Number(els.openAngle.value);
+  return closed + (els.positionalDirection.value === "0" ? travel : -travel);
+}
+
+function formatDuration(milliseconds) {
+  if (milliseconds % 1000 === 0) return `${milliseconds / 1000}秒`;
+  return `${(milliseconds / 1000).toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}秒`;
 }
 
 function syncTurnDegrees(value) {
@@ -545,9 +569,28 @@ function updateServoModeVisibility() {
   });
   els.continuousHelp.hidden = !continuous;
   els.positionalHelp.hidden = continuous;
-  els.travelAngle.textContent = continuous
-    ? `${els.turnDegrees.value}°（按耗时估算）`
-    : `${Math.abs(Number(els.openAngle.value) - Number(els.closedAngle.value))}°`;
+  const pauseMs = clampInteger(els.actionPauseMs.value, 0, 10000, 1000);
+  if (continuous) {
+    const degrees = clampInteger(els.turnDegrees.value, 1, 360, 90);
+    const msPerRev = clampInteger(els.msPerRev.value, 250, 10000, 4000);
+    const runMs = Math.max(50, Math.round(degrees * msPerRev / 360));
+    const first = els.continuousDirection.value === "0" ? "顺时针" : "逆时针";
+    const reverse = first === "顺时针" ? "逆时针" : "顺时针";
+    els.travelAngle.textContent = els.continuousReturn.value === "1"
+      ? `${first}${degrees}°（约${formatDuration(runMs)}） → 停留${formatDuration(pauseMs)} → ${reverse}${degrees}°`
+      : `${first}${degrees}°（约${formatDuration(runMs)}） → 停留${formatDuration(pauseMs)}`;
+    return;
+  }
+
+  const travel = clampInteger(els.openAngle.value, 1, 180, 90);
+  const target = positionalTargetAngle();
+  const moveMs = clampInteger(els.positionalMoveMs.value, 100, 10000, 1000);
+  const returnMs = clampInteger(els.positionalReturnMs.value, 100, 10000, 1000);
+  const first = els.positionalDirection.value === "0" ? "顺时针" : "逆时针";
+  const reverse = first === "顺时针" ? "逆时针" : "顺时针";
+  els.travelAngle.textContent = target < 0 || target > 180
+    ? `目标位置${target}°超出0～180°，请调整起始位置、方向或角度`
+    : `${first}${travel}°（${formatDuration(moveMs)}，到${target}°） → 停留${formatDuration(pauseMs)} → ${reverse}${travel}°（${formatDuration(returnMs)}）`;
 }
 
 function bindTurnDegrees() {
@@ -862,6 +905,24 @@ function cooldownRemaining() {
   return Math.max(0, lastFeedAt + minInterval - Math.floor(Date.now() / 1000));
 }
 
+function estimatedServoActionMs(portion = 1) {
+  const telemetry = state.telemetry || {};
+  const pauseMs = clampInteger(telemetry.action_pause_ms, 0, 10000, 1000);
+  let cycleMs;
+  if (Number(telemetry.servo_mode) === 0) {
+    const moveMs = clampInteger(telemetry.positional_move_ms, 100, 10000, 1000);
+    const returnMs = clampInteger(telemetry.positional_return_ms, 100, 10000, 1000);
+    cycleMs = moveMs + pauseMs + returnMs + 450;
+  } else {
+    const degrees = clampInteger(telemetry.continuous_turn_degrees, 1, 360, 90);
+    const msPerRev = clampInteger(telemetry.continuous_ms_per_rev, 250, 10000, 4000);
+    const runMs = Math.max(50, Math.round(degrees * msPerRev / 360));
+    const shouldReturn = telemetry.continuous_return === true || telemetry.continuous_return === 1;
+    cycleMs = runMs + pauseMs + (shouldReturn ? runMs : 0) + 450;
+  }
+  return Math.max(1, portion) * cycleMs;
+}
+
 function updateControls() {
   const cooldown = cooldownRemaining();
   const pending = Boolean(state.pendingId);
@@ -914,21 +975,27 @@ function updateControls() {
 
 function readDeviceConfigForm() {
   const mode = clampInteger(els.servoMode.value, 0, 1, 1);
-  const closed = clampInteger(els.closedAngleNumber.value, 0, 180, 12);
-  const open = clampInteger(els.openAngleNumber.value, 0, 180, 92);
-  const turnDegrees = clampInteger(els.turnDegreesNumber.value, 1, 360, 180);
-  const msPerRev = clampInteger(els.msPerRev.value, 250, 10000, 2000);
+  const closed = clampInteger(els.closedAngleNumber.value, 0, 180, 90);
+  const positionalTravel = clampInteger(els.openAngleNumber.value, 1, 180, 90);
+  const positionalDirection = clampInteger(els.positionalDirection.value, 0, 1, 0);
+  const positionalTarget = closed + (positionalDirection === 0 ? positionalTravel : -positionalTravel);
+  const open = mode === 0 ? positionalTarget : Math.max(0, Math.min(180, positionalTarget));
+  const turnDegrees = clampInteger(els.turnDegreesNumber.value, 1, 360, 90);
+  const msPerRev = clampInteger(els.msPerRev.value, 250, 10000, 4000);
   const forwardUs = clampInteger(els.forwardUs.value, 1000, 2000, 1700);
   const reverseUs = clampInteger(els.reverseUs.value, 1000, 2000, 1300);
   const stopUs = clampInteger(els.stopUs.value, 1400, 1600, 1500);
   const direction = clampInteger(els.continuousDirection.value, 0, 1, 0);
   const continuousReturn = clampInteger(els.continuousReturn.value, 0, 1, 0);
+  const positionalMoveMs = clampInteger(els.positionalMoveMs.value, 100, 10000, 1000);
+  const actionPauseMs = clampInteger(els.actionPauseMs.value, 0, 10000, 1000);
+  const positionalReturnMs = clampInteger(els.positionalReturnMs.value, 100, 10000, 1000);
   const minInterval = clampInteger(els.minInterval.value, 10, 86400, 60);
   const maxFeeds = clampInteger(els.maxFeeds.value, 1, 100, 8);
   const maxPortions = clampInteger(els.maxPortions.value, 1, 300, 12);
-  if (mode === 0 && closed === open) throw new Error("180°模式下，关闭位置和投喂位置不能相同。");
+  if (mode === 0 && (positionalTarget < 0 || positionalTarget > 180)) throw new Error(`180°模式的目标位置是${positionalTarget}°，已超出0～180°。请调整起始位置、方向或转动角度。`);
   if (mode === 1 && Math.abs(forwardUs - stopUs) < 20) throw new Error("正转脉宽与停止脉宽过于接近，连续舵机可能不会转动。");
-  return { mode, closed, open, turnDegrees, msPerRev, forwardUs, reverseUs, stopUs, direction, continuousReturn, minInterval, maxFeeds, maxPortions };
+  return { mode, closed, open, turnDegrees, msPerRev, forwardUs, reverseUs, stopUs, direction, continuousReturn, positionalMoveMs, actionPauseMs, positionalReturnMs, minInterval, maxFeeds, maxPortions };
 }
 
 async function sendDeviceConfig(values) {
@@ -949,6 +1016,9 @@ async function sendDeviceConfig(values) {
       values.stopUs,
       values.direction,
       values.continuousReturn,
+      values.positionalMoveMs,
+      values.actionPauseMs,
+      values.positionalReturnMs,
       values.minInterval,
       values.maxPortions,
       values.maxFeeds
@@ -997,7 +1067,10 @@ async function sendServoTestCommand() {
   try {
     command.sig = await signCommand(command, state.config.commandSecret);
     state.pendingServoTestId = command.id;
-    state.pendingServoTestExpiresAt = (command.expires_at + 5) * 1000;
+    state.pendingServoTestExpiresAt = Math.max(
+      (command.expires_at + 5) * 1000,
+      Date.now() + estimatedServoActionMs(1) + 15000
+    );
     els.servoTestStatus.textContent = "正在发送测试命令…";
     els.deviceConfigError.textContent = "";
     updateControls();
@@ -1036,7 +1109,10 @@ async function sendFeedCommand() {
   try {
     command.sig = await signCommand(command, state.config.commandSecret);
     state.pendingId = command.id;
-    state.pendingExpiresAt = (command.expires_at + 5) * 1000;
+    state.pendingExpiresAt = Math.max(
+      (command.expires_at + 5) * 1000,
+      Date.now() + estimatedServoActionMs(state.portion) + 15000
+    );
     upsertHistory({ id: command.id, time: Date.now(), portion: state.portion, status: "sent", reason: "" });
     updateControls();
     setActionMessage("命令已发送，等待设备确认。", "success");
@@ -1107,6 +1183,27 @@ function bindEvents() {
     state.deviceConfigDirty = true;
     updateServoModeVisibility();
   });
+  [
+    els.positionalDirection,
+    els.positionalMoveMs,
+    els.positionalReturnMs,
+    els.msPerRev,
+    els.forwardUs,
+    els.reverseUs,
+    els.stopUs,
+    els.continuousDirection,
+    els.continuousReturn,
+    els.actionPauseMs,
+    els.minInterval,
+    els.maxFeeds,
+    els.maxPortions
+  ].forEach((element) => {
+    const eventName = element.tagName === "SELECT" ? "change" : "input";
+    element.addEventListener(eventName, () => {
+      state.deviceConfigDirty = true;
+      updateServoModeVisibility();
+    });
+  });
   els.deviceConfigForm.addEventListener("submit", (event) => {
     event.preventDefault();
     try {
@@ -1119,15 +1216,19 @@ function bindEvents() {
   els.resetDeviceConfig.addEventListener("click", () => {
     state.deviceConfigDirty = true;
     els.servoMode.value = "1";
-    syncAngleInput("closed", 12);
-    syncAngleInput("open", 92);
-    syncTurnDegrees(180);
-    els.msPerRev.value = "2000";
+    syncAngleInput("closed", 90);
+    syncAngleInput("open", 90);
+    els.positionalDirection.value = "0";
+    els.positionalMoveMs.value = "1000";
+    els.positionalReturnMs.value = "1000";
+    els.actionPauseMs.value = "1000";
+    syncTurnDegrees(90);
+    els.msPerRev.value = "4000";
     els.forwardUs.value = "1700";
     els.reverseUs.value = "1300";
     els.stopUs.value = "1500";
     els.continuousDirection.value = "0";
-    els.continuousReturn.value = "0";
+    els.continuousReturn.value = "1";
     els.minInterval.value = "60";
     els.maxFeeds.value = "8";
     els.maxPortions.value = "12";

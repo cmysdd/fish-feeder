@@ -27,8 +27,8 @@ static_assert(
   "MIN_FEED_INTERVAL_SECONDS must be at least COMMAND_MAX_AGE_SECONDS."
 );
 
-static const char *FIRMWARE_VERSION = "1.4.1";
-static const uint32_t SAFETY_MAGIC = 0x46454547UL;
+static const char *FIRMWARE_VERSION = "1.5.0";
+static const uint32_t SAFETY_MAGIC = 0x46454548UL;
 static const uint32_t WIFI_CONFIG_MAGIC = 0x57494649UL;
 static const uint32_t DOUBLE_RESET_MAGIC = 0x44525354UL;
 static const uint16_t EEPROM_BYTES = 512;
@@ -66,6 +66,9 @@ struct PersistedSafetyState {
   uint16_t continuousStopUs;
   uint8_t continuousDirection;
   uint8_t continuousReturn;
+  uint16_t positionalMoveMs;
+  uint16_t actionPauseMs;
+  uint16_t positionalReturnMs;
   uint32_t minFeedIntervalSeconds;
   uint16_t maxPortionsPer24h;
   uint16_t maxFeedsPer24h;
@@ -235,7 +238,10 @@ void resetSafetyState(uint32_t now = 0) {
   safetyState.continuousReverseUs = SERVO_CONTINUOUS_REVERSE_US;
   safetyState.continuousStopUs = SERVO_CONTINUOUS_STOP_US;
   safetyState.continuousDirection = 0;
-  safetyState.continuousReturn = 0;
+  safetyState.continuousReturn = 1;
+  safetyState.positionalMoveMs = SERVO_POSITIONAL_MOVE_MS;
+  safetyState.actionPauseMs = SERVO_ACTION_PAUSE_MS;
+  safetyState.positionalReturnMs = SERVO_POSITIONAL_RETURN_MS;
   safetyState.minFeedIntervalSeconds = MIN_FEED_INTERVAL_SECONDS;
   safetyState.maxPortionsPer24h = MAX_PORTIONS_PER_24H;
   safetyState.maxFeedsPer24h = DEFAULT_MAX_FEEDS_PER_24H;
@@ -261,6 +267,9 @@ void loadSafetyState() {
     safetyState.continuousStopUs < 1400 || safetyState.continuousStopUs > 1600 ||
     safetyState.continuousDirection > 1 ||
     safetyState.continuousReturn > 1 ||
+    safetyState.positionalMoveMs < 100 || safetyState.positionalMoveMs > 10000UL ||
+    safetyState.actionPauseMs > 10000UL ||
+    safetyState.positionalReturnMs < 100 || safetyState.positionalReturnMs > 10000UL ||
     safetyState.minFeedIntervalSeconds < 10 ||
     safetyState.minFeedIntervalSeconds > 86400UL ||
     safetyState.maxPortionsPer24h < 1 ||
@@ -377,7 +386,7 @@ void publishState() {
   const uint32_t now = epochNow();
   if (now > 0) refreshRollingWindow(now);
 
-  StaticJsonDocument<1536> document;
+  StaticJsonDocument<1792> document;
   document["v"] = 1;
   document["online"] = true;
   document["device_id"] = DEVICE_ID;
@@ -407,6 +416,9 @@ void publishState() {
   document["continuous_stop_us"] = safetyState.continuousStopUs;
   document["continuous_direction"] = safetyState.continuousDirection;
   document["continuous_return"] = safetyState.continuousReturn == 1;
+  document["positional_move_ms"] = safetyState.positionalMoveMs;
+  document["action_pause_ms"] = safetyState.actionPauseMs;
+  document["positional_return_ms"] = safetyState.positionalReturnMs;
   document["last_error"] = lastError;
   document["last_feed_source"] = lastFeedSource;
   document["timezone_offset_minutes"] = TIMEZONE_OFFSET_SECONDS / 60UL;
@@ -441,12 +453,44 @@ void waitWithMqtt(uint32_t durationMs) {
   }
 }
 
+void movePositionalServo(uint16_t fromAngle, uint16_t toAngle, uint32_t durationMs) {
+  const uint32_t stepIntervalMs = 20UL;
+  const uint32_t steps = durationMs / stepIntervalMs > 0 ? durationMs / stepIntervalMs : 1UL;
+  const int32_t delta = static_cast<int32_t>(toAngle) - static_cast<int32_t>(fromAngle);
+  const uint32_t startedAt = millis();
+
+  for (uint32_t step = 1; step <= steps; ++step) {
+    const int32_t angle = static_cast<int32_t>(fromAngle) + (delta * static_cast<int32_t>(step)) / static_cast<int32_t>(steps);
+    feederServo.write(static_cast<int>(angle));
+    const uint32_t targetElapsed = (durationMs * step) / steps;
+    const uint32_t elapsed = static_cast<uint32_t>(millis() - startedAt);
+    if (targetElapsed > elapsed) waitWithMqtt(targetElapsed - elapsed);
+  }
+  feederServo.write(toAngle);
+}
+
 void attachFeederServo() {
   if (safetyState.servoMode == 0) {
     feederServo.attach(SERVO_PIN, SERVO_POSITIONAL_MIN_US, SERVO_POSITIONAL_MAX_US);
   } else {
     feederServo.attach(SERVO_PIN, 500, 2400);
   }
+}
+
+bool moveServoToIdlePosition() {
+  attachFeederServo();
+  if (!feederServo.attached()) return false;
+
+  if (safetyState.servoMode == 0) {
+    Serial.printf("Positioning servo at closed angle: %u\n", safetyState.servoClosedAngle);
+    feederServo.write(safetyState.servoClosedAngle);
+    waitWithMqtt(900);
+  } else {
+    feederServo.writeMicroseconds(safetyState.continuousStopUs);
+    waitWithMqtt(150);
+  }
+  feederServo.detach();
+  return true;
 }
 
 bool runServoCycles(int portion) {
@@ -485,7 +529,7 @@ bool runServoCycles(int portion) {
       feederServo.writeMicroseconds(driveUs);
       waitWithMqtt(runMs);
       feederServo.writeMicroseconds(safetyState.continuousStopUs);
-      waitWithMqtt(120);
+      waitWithMqtt(safetyState.actionPauseMs);
       if (safetyState.continuousReturn == 1) {
         feederServo.writeMicroseconds(returnUs);
         waitWithMqtt(runMs);
@@ -500,11 +544,9 @@ bool runServoCycles(int portion) {
   feederServo.write(safetyState.servoClosedAngle);
   waitWithMqtt(250);
   for (int i = 0; i < portion; ++i) {
-    feederServo.write(safetyState.servoOpenAngle);
-    const uint32_t travel = static_cast<uint32_t>(abs(static_cast<int>(safetyState.servoOpenAngle) - static_cast<int>(safetyState.servoClosedAngle)));
-    const uint32_t travelWait = travel * 8UL;
-    waitWithMqtt(travelWait > SERVO_OPEN_MS ? travelWait : SERVO_OPEN_MS);
-    feederServo.write(safetyState.servoClosedAngle);
+    movePositionalServo(safetyState.servoClosedAngle, safetyState.servoOpenAngle, safetyState.positionalMoveMs);
+    waitWithMqtt(safetyState.actionPauseMs);
+    movePositionalServo(safetyState.servoOpenAngle, safetyState.servoClosedAngle, safetyState.positionalReturnMs);
     waitWithMqtt(SERVO_SETTLE_MS);
   }
   feederServo.detach();
@@ -682,7 +724,7 @@ void processConfigCommand(JsonDocument &document) {
   const uint32_t expiresAt = document["expires_at"] | 0;
   const String receivedSignature = document["sig"] | "";
 
-  if (version != 1 || !validCommandId(commandId) || action != "set_config" || configData.length() > 64) {
+  if (version != 1 || !validCommandId(commandId) || action != "set_config" || configData.length() > 128) {
     rejectConfigCommand(commandId, "invalid_payload");
     return;
   }
@@ -720,15 +762,19 @@ void processConfigCommand(JsonDocument &document) {
   int stopUs = 0;
   int direction = 0;
   int continuousReturn = 0;
+  unsigned long positionalMoveMs = SERVO_POSITIONAL_MOVE_MS;
+  unsigned long actionPauseMs = SERVO_ACTION_PAUSE_MS;
+  unsigned long positionalReturnMs = SERVO_POSITIONAL_RETURN_MS;
   unsigned long minInterval = 0;
   int maxPortions = 0;
   int maxFeeds = 0;
   char extra = '\0';
-  const int matched = sscanf(configData.c_str(), "%d,%d,%d,%d,%lu,%d,%d,%d,%d,%d,%lu,%d,%d%c",
+  const int matched = sscanf(configData.c_str(), "%d,%d,%d,%d,%lu,%d,%d,%d,%d,%d,%lu,%lu,%lu,%lu,%d,%d%c",
     &mode, &closedAngle, &openAngle, &turnDegrees, &msPerRev, &forwardUs, &reverseUs, &stopUs,
-    &direction, &continuousReturn, &minInterval, &maxPortions, &maxFeeds, &extra);
+    &direction, &continuousReturn, &positionalMoveMs, &actionPauseMs, &positionalReturnMs,
+    &minInterval, &maxPortions, &maxFeeds, &extra);
   int parsedFields = matched;
-  if (parsedFields != 13) {
+  if (parsedFields != 16) {
     mode = 0;
     closedAngle = 0;
     openAngle = 0;
@@ -739,6 +785,31 @@ void processConfigCommand(JsonDocument &document) {
     stopUs = 0;
     direction = 0;
     continuousReturn = 0;
+    positionalMoveMs = SERVO_POSITIONAL_MOVE_MS;
+    actionPauseMs = SERVO_ACTION_PAUSE_MS;
+    positionalReturnMs = SERVO_POSITIONAL_RETURN_MS;
+    minInterval = 0;
+    maxPortions = 0;
+    maxFeeds = 0;
+    extra = '\0';
+    parsedFields = sscanf(configData.c_str(), "%d,%d,%d,%d,%lu,%d,%d,%d,%d,%d,%lu,%d,%d%c",
+      &mode, &closedAngle, &openAngle, &turnDegrees, &msPerRev, &forwardUs, &reverseUs, &stopUs,
+      &direction, &continuousReturn, &minInterval, &maxPortions, &maxFeeds, &extra);
+  }
+  if (parsedFields != 16 && parsedFields != 13) {
+    mode = 0;
+    closedAngle = 0;
+    openAngle = 0;
+    turnDegrees = 0;
+    msPerRev = 0;
+    forwardUs = 0;
+    reverseUs = 0;
+    stopUs = 0;
+    direction = 0;
+    continuousReturn = 0;
+    positionalMoveMs = SERVO_POSITIONAL_MOVE_MS;
+    actionPauseMs = SERVO_ACTION_PAUSE_MS;
+    positionalReturnMs = SERVO_POSITIONAL_RETURN_MS;
     minInterval = 0;
     maxPortions = 0;
     maxFeeds = 0;
@@ -748,7 +819,7 @@ void processConfigCommand(JsonDocument &document) {
       &direction, &minInterval, &maxPortions, &maxFeeds, &extra);
   }
   if (
-    (parsedFields != 13 && parsedFields != 12) ||
+    (parsedFields != 16 && parsedFields != 13 && parsedFields != 12) ||
     (mode != 0 && mode != 1) ||
     closedAngle < 0 || closedAngle > 180 ||
     openAngle < 0 || openAngle > 180 || (mode == 0 && closedAngle == openAngle) ||
@@ -759,6 +830,9 @@ void processConfigCommand(JsonDocument &document) {
     stopUs < 1400 || stopUs > 1600 ||
     (direction != 0 && direction != 1) ||
     (continuousReturn != 0 && continuousReturn != 1) ||
+    positionalMoveMs < 100UL || positionalMoveMs > 10000UL ||
+    actionPauseMs > 10000UL ||
+    positionalReturnMs < 100UL || positionalReturnMs > 10000UL ||
     minInterval < 10UL || minInterval > 86400UL ||
     maxPortions < 1 || maxPortions > 300 ||
     maxFeeds < 1 || maxFeeds > 100
@@ -778,6 +852,9 @@ void processConfigCommand(JsonDocument &document) {
   safetyState.continuousStopUs = static_cast<uint16_t>(stopUs);
   safetyState.continuousDirection = static_cast<uint8_t>(direction);
   safetyState.continuousReturn = static_cast<uint8_t>(continuousReturn);
+  safetyState.positionalMoveMs = static_cast<uint16_t>(positionalMoveMs);
+  safetyState.actionPauseMs = static_cast<uint16_t>(actionPauseMs);
+  safetyState.positionalReturnMs = static_cast<uint16_t>(positionalReturnMs);
   safetyState.minFeedIntervalSeconds = static_cast<uint32_t>(minInterval);
   safetyState.maxPortionsPer24h = static_cast<uint16_t>(maxPortions);
   safetyState.maxFeedsPer24h = static_cast<uint16_t>(maxFeeds);
@@ -792,6 +869,13 @@ void processConfigCommand(JsonDocument &document) {
     safetyState.servoClosedAngle,
     safetyState.servoOpenAngle
   );
+
+  if (!moveServoToIdlePosition()) {
+    lastError = "servo_failed";
+    publishAcknowledgement(commandId, "failed", 0, "servo_failed", "set_config");
+    publishState();
+    return;
+  }
 
   lastError = "";
   publishAcknowledgement(commandId, "completed", 0, "config_updated", "set_config");
@@ -1213,11 +1297,7 @@ bool connectMqtt() {
 }
 
 void initializeServoPosition() {
-  attachFeederServo();
-  if (safetyState.servoMode == 1) feederServo.writeMicroseconds(safetyState.continuousStopUs);
-  else feederServo.write(safetyState.servoClosedAngle);
-  delay(500);
-  feederServo.detach();
+  moveServoToIdlePosition();
 }
 
 void setup() {
@@ -1241,7 +1321,7 @@ void setup() {
   mqttClient.setServer(MIXIO_HOST, MIXIO_PORT);
   mqttClient.setCallback(onMqttMessage);
   mqttClient.setBufferSize(2048);
-  mqttClient.setKeepAlive(30);
+  mqttClient.setKeepAlive(120);
 
   if (doubleResetRequested || digitalRead(CONFIG_PORTAL_BUTTON_PIN) == LOW) {
     Serial.println("Configuration button held; starting Wi-Fi setup mode");

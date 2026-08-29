@@ -4,9 +4,9 @@
 // NodeMCU D1 is GPIO5. Power the servo from a separate regulated 5V supply,
 // and connect the supply GND to NodeMCU GND.
 static const uint8_t SERVO_SIGNAL_PIN = D1;
-static const uint16_t POSITION_MIN_US = 1000;
+static const uint16_t POSITION_MIN_US = 500;
 static const uint16_t POSITION_CENTER_US = 1500;
-static const uint16_t POSITION_MAX_US = 2000;
+static const uint16_t POSITION_MAX_US = 2400;
 static const uint32_t HOLD_MS = 1800;
 
 Servo testServo;
