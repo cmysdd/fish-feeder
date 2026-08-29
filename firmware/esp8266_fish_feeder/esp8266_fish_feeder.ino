@@ -27,7 +27,7 @@ static_assert(
   "MIN_FEED_INTERVAL_SECONDS must be at least COMMAND_MAX_AGE_SECONDS."
 );
 
-static const char *FIRMWARE_VERSION = "1.4.0";
+static const char *FIRMWARE_VERSION = "1.4.1";
 static const uint32_t SAFETY_MAGIC = 0x46454547UL;
 static const uint32_t WIFI_CONFIG_MAGIC = 0x57494649UL;
 static const uint32_t DOUBLE_RESET_MAGIC = 0x44525354UL;
@@ -441,6 +441,14 @@ void waitWithMqtt(uint32_t durationMs) {
   }
 }
 
+void attachFeederServo() {
+  if (safetyState.servoMode == 0) {
+    feederServo.attach(SERVO_PIN, SERVO_POSITIONAL_MIN_US, SERVO_POSITIONAL_MAX_US);
+  } else {
+    feederServo.attach(SERVO_PIN, 500, 2400);
+  }
+}
+
 bool runServoCycles(int portion) {
   Serial.printf(
     "Servo sequence: mode=%u portion=%d closed=%u open=%u\n",
@@ -449,7 +457,7 @@ bool runServoCycles(int portion) {
     safetyState.servoClosedAngle,
     safetyState.servoOpenAngle
   );
-  feederServo.attach(SERVO_PIN, 500, 2400);
+  attachFeederServo();
   if (!feederServo.attached()) {
     Serial.println("Servo attach failed");
     return false;
@@ -1205,7 +1213,7 @@ bool connectMqtt() {
 }
 
 void initializeServoPosition() {
-  feederServo.attach(SERVO_PIN, 500, 2400);
+  attachFeederServo();
   if (safetyState.servoMode == 1) feederServo.writeMicroseconds(safetyState.continuousStopUs);
   else feederServo.write(safetyState.servoClosedAngle);
   delay(500);
