@@ -7,6 +7,7 @@ const MAX_HISTORY = 30;
 const MAX_SCHEDULES = 6;
 const DEFAULT_USERNAME = "2675752317@qq.com";
 const DEFAULT_PROJECT = "fish";
+const MOTION_SEQUENCE_FIRMWARE = "1.5.0";
 
 const state = {
   client: null,
@@ -26,6 +27,7 @@ const state = {
   pendingServoTestExpiresAt: 0,
   deviceConfigDirty: false,
   deviceConfigSupported: false,
+  deviceFirmware: "",
   editingScheduleIndex: -1,
   telemetry: null,
   history: loadHistory()
@@ -441,6 +443,7 @@ function renderTelemetry(payload) {
   els.rssi.textContent = Number.isFinite(Number(payload.rssi)) ? `${payload.rssi} dBm` : "--";
   els.freeHeap.textContent = Number.isFinite(Number(payload.free_heap)) ? `${payload.free_heap} B` : "--";
   els.firmware.textContent = payload.firmware || "--";
+  state.deviceFirmware = String(payload.firmware || "");
   els.clockState.textContent = payload.clock_ready === true ? "已同步（北京时间）" : "同步中";
   els.dailyPortions.textContent = Number.isFinite(Number(payload.portions_24h))
     ? `${payload.portions_24h}/${payload.max_portions_24h || "--"} 份` : "--";
@@ -464,8 +467,11 @@ function renderTelemetry(payload) {
 }
 
 function setDeviceConfigForm(payload = {}) {
-  state.deviceConfigSupported = Object.prototype.hasOwnProperty.call(payload, "servo_mode") &&
+  const hasMotionFields = Object.prototype.hasOwnProperty.call(payload, "servo_mode") &&
     Object.prototype.hasOwnProperty.call(payload, "positional_move_ms");
+  const firmware = String(payload.firmware || state.deviceFirmware || "");
+  const firmwareSupportsMotion = firmwareVersionAtLeast(firmware, MOTION_SEQUENCE_FIRMWARE);
+  state.deviceConfigSupported = hasMotionFields && firmwareSupportsMotion;
   if (state.deviceConfigDirty || state.pendingConfigId) return;
   const mode = clampInteger(payload.servo_mode, 0, 1, 1);
   const closed = clampInteger(payload.servo_closed_angle, 0, 180, 90);
@@ -502,12 +508,34 @@ function setDeviceConfigForm(payload = {}) {
   els.minInterval.value = String(interval);
   els.maxFeeds.value = String(maxFeeds);
   els.maxPortions.value = String(maxPortions);
-  els.configStatus.textContent = state.pendingConfigId ? "正在保存…" : (state.deviceConfigSupported ? "已读取设备参数" : "请升级固件到1.5.0");
+  els.configStatus.textContent = state.pendingConfigId
+    ? "正在保存…"
+    : state.deviceConfigSupported
+      ? "已读取设备参数"
+      : firmware && !firmwareSupportsMotion
+        ? `当前固件${firmware}，请烧录${MOTION_SEQUENCE_FIRMWARE}`
+        : "等待设备回传1.5.0参数";
+  els.deviceConfigError.textContent = state.deviceConfigSupported
+    ? ""
+    : firmware && !firmwareSupportsMotion
+      ? `网页已经是${MOTION_SEQUENCE_FIRMWARE}动作协议，但ESP8266仍是${firmware}。必须重新烧录主固件，刷新网页不能升级单片机。`
+      : "等待设备回传完整动作参数。";
   els.saveDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   els.resetDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   els.testServo.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId) || Boolean(state.pendingServoTestId);
   els.servoTestStatus.textContent = state.pendingServoTestId ? "设备正在执行测试…" : "保存参数后可空载测试一次";
   updateServoModeVisibility();
+}
+
+function firmwareVersionAtLeast(actual, required) {
+  const parse = (value) => String(value).match(/^(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
+  const left = parse(actual);
+  const right = parse(required);
+  if (!left || !right) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] > right[index];
+  }
+  return true;
 }
 
 function clampInteger(value, min, max, fallback) {
@@ -999,6 +1027,12 @@ function readDeviceConfigForm() {
 }
 
 async function sendDeviceConfig(values) {
+  if (!state.deviceConfigSupported) {
+    const message = `当前ESP8266固件${state.deviceFirmware || "未知"}不支持动作序列，请先烧录${MOTION_SEQUENCE_FIRMWARE}。`;
+    els.deviceConfigError.textContent = message;
+    showToast(message, "error");
+    return;
+  }
   if (!state.client || !state.config || !state.brokerConnected || !state.deviceOnline || state.pendingConfigId) return;
   const now = Math.floor(Date.now() / 1000);
   const command = {
@@ -1029,7 +1063,7 @@ async function sendDeviceConfig(values) {
   try {
     command.sig = await signCommand(command, state.config.commandSecret);
     state.pendingConfigId = command.id;
-    state.pendingConfigExpiresAt = (command.expires_at + 5) * 1000;
+    state.pendingConfigExpiresAt = Date.now() + 15000;
     els.deviceConfigError.textContent = "";
     els.configStatus.textContent = "正在保存…";
     updateControls();
@@ -1050,6 +1084,12 @@ async function sendDeviceConfig(values) {
 }
 
 async function sendServoTestCommand() {
+  if (!state.deviceConfigSupported) {
+    const message = `当前ESP8266固件${state.deviceFirmware || "未知"}不支持新版舵机测试，请先烧录${MOTION_SEQUENCE_FIRMWARE}。`;
+    els.deviceConfigError.textContent = message;
+    showToast(message, "error");
+    return;
+  }
   if (!state.client || !state.config || !state.brokerConnected || !state.deviceOnline ||
       !state.deviceConfigSupported || state.pendingServoTestId || state.pendingConfigId) return;
   if (!window.confirm("确认空载测试当前舵机？测试不会计入投喂次数，但舵机会执行一次动作。")) return;
