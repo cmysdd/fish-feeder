@@ -7,7 +7,7 @@ const MAX_HISTORY = 30;
 const MAX_SCHEDULES = 6;
 const DEFAULT_USERNAME = "2675752317@qq.com";
 const DEFAULT_PROJECT = "fish";
-const MOTION_SEQUENCE_FIRMWARE = "1.5.1";
+const MOTION_SEQUENCE_FIRMWARE = "1.5.2";
 
 const state = {
   client: null,
@@ -15,6 +15,7 @@ const state = {
   brokerConnected: false,
   deviceOnline: false,
   lastDeviceAt: 0,
+  lastDeviceUptime: 0,
   portion: 1,
   pendingId: "",
   pendingExpiresAt: 0,
@@ -23,6 +24,7 @@ const state = {
   pendingSchedules: null,
   pendingConfigId: "",
   pendingConfigExpiresAt: 0,
+  pendingConfigStateChecks: 0,
   pendingServoTestId: "",
   pendingServoTestExpiresAt: 0,
   deviceConfigDirty: false,
@@ -436,6 +438,27 @@ function handleMessage(receivedTopic, message) {
 }
 
 function renderTelemetry(payload) {
+  const uptime = Number(payload.uptime_s);
+  const restarted = Number.isFinite(uptime) && state.lastDeviceUptime > uptime + 3;
+  if (Number.isFinite(uptime)) state.lastDeviceUptime = uptime;
+
+  if (state.pendingConfigId && payload.last_config_command_id === state.pendingConfigId) {
+    confirmDeviceConfigSaved("设备状态已确认参数保存成功");
+  }
+  if (
+    state.pendingServoTestId &&
+    payload.last_servo_test_command_id === state.pendingServoTestId &&
+    payload.last_servo_test_status === "completed"
+  ) {
+    state.pendingServoTestId = "";
+    state.pendingServoTestExpiresAt = 0;
+    els.servoTestStatus.textContent = "测试完成";
+    els.deviceConfigError.textContent = "";
+    setActionMessage("设备状态已确认舵机测试完成。", "success");
+    showToast("舵机测试完成");
+  }
+  if (restarted) handleDeviceRestartDuringCommand(payload.reset_reason);
+
   els.deviceId.textContent = payload.device_id || "feeder-001";
   els.lastSeen.textContent = formatTime(payload.ts || Date.now());
   els.deviceIp.textContent = payload.ip || "--";
@@ -800,6 +823,40 @@ function upsertHistory(entry) {
   renderHistory();
 }
 
+function confirmDeviceConfigSaved(message = "投喂参数已保存") {
+  state.pendingConfigId = "";
+  state.pendingConfigExpiresAt = 0;
+  state.pendingConfigStateChecks = 0;
+  state.deviceConfigDirty = false;
+  els.deviceConfigError.textContent = "";
+  els.configStatus.textContent = "已保存到投喂器";
+  showToast(message);
+  updateControls();
+}
+
+function handleDeviceRestartDuringCommand(resetReason = "") {
+  const detail = resetReason ? `（复位原因：${resetReason}）` : "";
+  const message = `设备在舵机动作期间重启${detail}。网络在线不代表舵机供电正常，请检查独立5V电源、共地和电容。`;
+  const servoTestInterrupted = Boolean(state.pendingServoTestId);
+  const feedInterrupted = Boolean(state.pendingId);
+
+  if (servoTestInterrupted) {
+    state.pendingServoTestId = "";
+    state.pendingServoTestExpiresAt = 0;
+    els.servoTestStatus.textContent = "舵机动作导致设备重启";
+    els.deviceConfigError.textContent = message;
+  }
+  if (feedInterrupted) {
+    const interruptedId = state.pendingId;
+    state.pendingId = "";
+    state.pendingExpiresAt = 0;
+    upsertHistory({ id: interruptedId, status: "failed", reason: "设备在舵机动作期间重启" });
+    setActionMessage(message, "error");
+  }
+  if (servoTestInterrupted || feedInterrupted) showToast(message, "error");
+  updateControls();
+}
+
 function handleAcknowledgement(payload) {
   if (!payload.id) return;
   const status = payload.status || "failed";
@@ -829,16 +886,12 @@ function handleAcknowledgement(payload) {
   if (payload.action === "set_config" || payload.id === state.pendingConfigId) {
     if (payload.id !== state.pendingConfigId) return;
     if (status === "completed" || status === "duplicate") {
-      state.pendingConfigId = "";
-      state.pendingConfigExpiresAt = 0;
-      state.deviceConfigDirty = false;
-      els.deviceConfigError.textContent = "";
-      els.configStatus.textContent = "已保存到投喂器";
-      showToast("投喂参数已保存");
+      confirmDeviceConfigSaved();
       requestState();
     } else if (status !== "processing") {
       state.pendingConfigId = "";
       state.pendingConfigExpiresAt = 0;
+      state.pendingConfigStateChecks = 0;
       const message = reasonLabels[payload.reason] || payload.reason || "参数保存失败";
       els.deviceConfigError.textContent = message;
       els.configStatus.textContent = "保存失败";
@@ -1076,6 +1129,7 @@ async function sendDeviceConfig(values) {
     command.sig = await signCommand(command, state.config.commandSecret);
     state.pendingConfigId = command.id;
     state.pendingConfigExpiresAt = Date.now() + 15000;
+    state.pendingConfigStateChecks = 0;
     els.deviceConfigError.textContent = "";
     els.configStatus.textContent = "正在保存…";
     updateControls();
@@ -1083,6 +1137,7 @@ async function sendDeviceConfig(values) {
       if (!error) return;
       state.pendingConfigId = "";
       state.pendingConfigExpiresAt = 0;
+      state.pendingConfigStateChecks = 0;
       els.deviceConfigError.textContent = `发送失败：${error.message}`;
       els.configStatus.textContent = "发送失败";
       updateControls();
@@ -1090,6 +1145,7 @@ async function sendDeviceConfig(values) {
   } catch (error) {
     state.pendingConfigId = "";
     state.pendingConfigExpiresAt = 0;
+    state.pendingConfigStateChecks = 0;
     els.deviceConfigError.textContent = error.message;
     updateControls();
   }
@@ -1464,10 +1520,19 @@ function tick() {
     showToast("设备没有确认计划，请检查连接后重试", "error");
   }
   if (state.pendingConfigId && Date.now() > state.pendingConfigExpiresAt) {
-    state.pendingConfigId = "";
-    state.pendingConfigExpiresAt = 0;
-    els.configStatus.textContent = "设备未确认，请检查连接";
-    els.deviceConfigError.textContent = "设备没有确认参数，请检查连接后重试。";
+    if (state.pendingConfigStateChecks === 0) {
+      els.configStatus.textContent = "正在核对设备状态…";
+      els.deviceConfigError.textContent = "没有收到保存确认，正在向设备查询已写入的参数。";
+      state.pendingConfigStateChecks = 1;
+      state.pendingConfigExpiresAt = Date.now() + 10000;
+      requestState();
+    } else {
+      state.pendingConfigId = "";
+      state.pendingConfigExpiresAt = 0;
+      state.pendingConfigStateChecks = 0;
+      els.configStatus.textContent = "设备未确认保存";
+      els.deviceConfigError.textContent = "设备既没有返回保存确认，状态中也没有这次配置编号。参数可能未保存，请检查固件版本和供电后再试。";
+    }
   }
   if (state.pendingServoTestId && Date.now() > state.pendingServoTestExpiresAt) {
     state.pendingServoTestId = "";

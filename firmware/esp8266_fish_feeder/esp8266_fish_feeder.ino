@@ -27,7 +27,7 @@ static_assert(
   "MIN_FEED_INTERVAL_SECONDS must be at least COMMAND_MAX_AGE_SECONDS."
 );
 
-static const char *FIRMWARE_VERSION = "1.5.1";
+static const char *FIRMWARE_VERSION = "1.5.2";
 static const uint32_t SAFETY_MAGIC = 0x46454548UL;
 static const uint32_t WIFI_CONFIG_MAGIC = 0x57494649UL;
 static const uint32_t DOUBLE_RESET_MAGIC = 0x44525354UL;
@@ -103,6 +103,7 @@ String queryTopic;
 String lastError;
 String lastFeedSource;
 String lastServoTestCommandId;
+String lastServoTestStatus;
 String pendingCommandBody;
 
 uint32_t lastMqttAttemptAt = 0;
@@ -421,6 +422,10 @@ void publishState() {
   document["positional_move_ms"] = safetyState.positionalMoveMs;
   document["action_pause_ms"] = safetyState.actionPauseMs;
   document["positional_return_ms"] = safetyState.positionalReturnMs;
+  document["last_config_command_id"] = safetyState.lastConfigCommandId;
+  document["last_servo_test_command_id"] = lastServoTestCommandId;
+  document["last_servo_test_status"] = lastServoTestStatus;
+  document["reset_reason"] = ESP.getResetReason();
   document["last_error"] = lastError;
   document["last_feed_source"] = lastFeedSource;
   document["timezone_offset_minutes"] = TIMEZONE_OFFSET_SECONDS / 60UL;
@@ -450,6 +455,7 @@ void publishOnline(bool online) {
 void waitWithMqtt(uint32_t durationMs) {
   const uint32_t startedAt = millis();
   while (!due(millis(), startedAt, durationMs)) {
+    if (mqttClient.connected()) mqttClient.loop();
     delay(10);
     yield();
   }
@@ -473,26 +479,15 @@ void movePositionalServo(uint16_t fromAngle, uint16_t toAngle, uint32_t duration
 
 void attachFeederServo() {
   if (safetyState.servoMode == 0) {
-    feederServo.attach(SERVO_PIN, SERVO_POSITIONAL_MIN_US, SERVO_POSITIONAL_MAX_US);
+    feederServo.attach(
+      SERVO_PIN,
+      SERVO_POSITIONAL_MIN_US,
+      SERVO_POSITIONAL_MAX_US,
+      safetyState.servoClosedAngle
+    );
   } else {
-    feederServo.attach(SERVO_PIN, 500, 2400);
+    feederServo.attach(SERVO_PIN, 500, 2400, safetyState.continuousStopUs);
   }
-}
-
-bool moveServoToIdlePosition() {
-  attachFeederServo();
-  if (!feederServo.attached()) return false;
-
-  if (safetyState.servoMode == 0) {
-    Serial.printf("Positioning servo at closed angle: %u\n", safetyState.servoClosedAngle);
-    feederServo.write(safetyState.servoClosedAngle);
-    waitWithMqtt(900);
-  } else {
-    feederServo.writeMicroseconds(safetyState.continuousStopUs);
-    waitWithMqtt(150);
-  }
-  feederServo.detach();
-  return true;
 }
 
 bool runServoCycles(int portion) {
@@ -872,13 +867,9 @@ void processConfigCommand(JsonDocument &document) {
     safetyState.servoOpenAngle
   );
 
-  if (!moveServoToIdlePosition()) {
-    lastError = "servo_failed";
-    publishAcknowledgement(commandId, "failed", 0, "servo_failed", "set_config");
-    publishState();
-    return;
-  }
-
+  // Saving settings must never move the mechanism. Apart from being
+  // surprising, that made a weak servo supply reboot the ESP before the
+  // browser received its acknowledgement.
   lastError = "";
   publishAcknowledgement(commandId, "completed", 0, "config_updated", "set_config");
   publishState();
@@ -919,6 +910,7 @@ void processServoTestCommand(JsonDocument &document) {
     return;
   }
   lastServoTestCommandId = commandId;
+  lastServoTestStatus = "processing";
 
   Serial.printf(
     "Servo test requested: mode=%u closed=%u open=%u\n",
@@ -928,6 +920,7 @@ void processServoTestCommand(JsonDocument &document) {
   );
   publishAcknowledgement(commandId, "processing", portion, "", "servo_test");
   const bool completed = runServoCycles(1);
+  lastServoTestStatus = completed ? "completed" : "failed";
   lastError = completed ? "" : "servo_failed";
   publishAcknowledgement(
     commandId,
@@ -1311,10 +1304,6 @@ bool connectMqtt() {
   return true;
 }
 
-void initializeServoPosition() {
-  moveServoToIdlePosition();
-}
-
 void setup() {
   Serial.begin(115200);
   Serial.println();
@@ -1325,7 +1314,6 @@ void setup() {
   writeDoubleResetMarker();
   doubleResetMarkerSetAt = millis();
   loadSafetyState();
-  initializeServoPosition();
 
   commandTopic = topicFor("feeder_cmd");
   acknowledgementTopic = topicFor("feeder_ack");
