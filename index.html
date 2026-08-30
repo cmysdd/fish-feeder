@@ -7,9 +7,9 @@
     <meta name="description" content="ESP8266 远程鱼食投喂器控制台">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self' wss://mixio.mixly.cn:8084; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self' https://mixio.mixly.cn; style-src 'self'">
     <title>鱼缸投喂器</title>
-  <link rel="stylesheet" href="styles.css?v=1.5.3">
+  <link rel="stylesheet" href="styles.css?v=1.5.4">
     <script src="https://mixio.mixly.cn/js/mqtt.min.js" defer></script>
-  <script src="app.js?v=1.5.3" defer></script>
+  <script src="app.js?v=1.5.4" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -57,12 +57,6 @@
           <span id="cooldown-label" class="cooldown-label">等待设备连接</span>
         </div>
 
-        <div class="portion-selector" role="group" aria-label="投喂份量">
-          <button class="portion-button is-selected" type="button" data-portion="1">1 份</button>
-          <button class="portion-button" type="button" data-portion="2">2 份</button>
-          <button class="portion-button" type="button" data-portion="3">3 份</button>
-        </div>
-
         <button id="feed-button" class="feed-button" type="button" disabled>
           <span id="feed-button-title">立即投喂</span>
           <small id="feed-button-note">设备在线后可操作</small>
@@ -104,7 +98,6 @@
           <div><dt>可用内存</dt><dd id="free-heap">--</dd></div>
           <div><dt>固件版本</dt><dd id="firmware">--</dd></div>
           <div><dt>设备时间</dt><dd id="clock-state">--</dd></div>
-          <div><dt>24 小时份量</dt><dd id="daily-portions">--</dd></div>
           <div><dt>24 小时次数</dt><dd id="daily-feeds">--</dd></div>
           <div><dt>最近投喂</dt><dd id="last-feed">--</dd></div>
           <div><dt>投喂来源</dt><dd id="last-feed-source">--</dd></div>
@@ -120,7 +113,7 @@
           </div>
           <span id="config-status" class="cooldown-label">读取设备后可修改</span>
         </div>
-        <p class="panel-note">参数保存在 ESP8266 中，网页关闭或断电后仍然保留。两种舵机都使用同一根信号线和 MQTT 协议，但控制方式不同：180°舵机按目标角度定位，360°舵机按方向、速度和运行时间控制。</p>
+          <p class="panel-note">参数保存在 ESP8266 中，网页关闭或断电后仍然保留。每次点击“立即投喂”只执行一次完整动作；两种舵机都使用同一根信号线和 MQTT 协议，但控制方式不同：180°舵机按目标角度定位，360°舵机按方向、速度和运行时间控制。</p>
         <form id="device-config-form" class="device-config-form">
           <label>
             <span>舵机类型</span>
@@ -190,10 +183,6 @@
             <span>每日最多投喂次数</span>
             <input id="max-feeds" type="number" min="1" max="100" step="1" value="8" required>
           </label>
-          <label>
-            <span>每日最多投喂份量</span>
-            <input id="max-portions" type="number" min="1" max="300" step="1" value="12" required>
-          </label>
           <p class="config-derived" id="travel-summary">当前动作：<strong id="travel-angle">顺时针90° → 停留1秒 → 逆时针90°</strong></p>
           <div class="device-config-actions">
             <button id="save-device-config" class="button button-primary" type="submit" disabled>保存到投喂器</button>
@@ -218,10 +207,10 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>时间</th><th>份量</th><th>状态</th><th>说明</th></tr>
+              <tr><th>时间</th><th>状态</th><th>说明</th></tr>
             </thead>
             <tbody id="history-body">
-              <tr><td colspan="4" class="empty">暂无操作记录</td></tr>
+              <tr><td colspan="3" class="empty">暂无操作记录</td></tr>
             </tbody>
           </table>
         </div>
@@ -244,15 +233,6 @@
           <span>执行时间（北京时间）</span>
           <input id="schedule-time" type="time" value="08:00" required>
         </label>
-        <label>
-          <span>每次投喂份量</span>
-          <select id="schedule-portion" required>
-            <option value="1">1 份</option>
-            <option value="2">2 份</option>
-            <option value="3">3 份</option>
-          </select>
-        </label>
-
         <fieldset class="weekday-fieldset">
           <legend>重复日期</legend>
           <div class="weekday-presets" aria-label="快捷选择日期">

@@ -7,7 +7,7 @@ const MAX_HISTORY = 30;
 const MAX_SCHEDULES = 6;
 const DEFAULT_USERNAME = "2675752317@qq.com";
 const DEFAULT_PROJECT = "fish";
-const MOTION_SEQUENCE_FIRMWARE = "1.5.2";
+const MOTION_SEQUENCE_FIRMWARE = "1.5.3";
 
 const state = {
   client: null,
@@ -16,7 +16,6 @@ const state = {
   deviceOnline: false,
   lastDeviceAt: 0,
   lastDeviceUptime: 0,
-  portion: 1,
   pendingId: "",
   pendingExpiresAt: 0,
   pendingScheduleId: "",
@@ -57,7 +56,6 @@ const els = {
   freeHeap: $("free-heap"),
   firmware: $("firmware"),
   clockState: $("clock-state"),
-  dailyPortions: $("daily-portions"),
   dailyFeeds: $("daily-feeds"),
   lastFeed: $("last-feed"),
   lastFeedSource: $("last-feed-source"),
@@ -89,7 +87,6 @@ const els = {
   actionPauseMs: $("action-pause-ms"),
   minInterval: $("min-interval"),
   maxFeeds: $("max-feeds"),
-  maxPortions: $("max-portions"),
   saveDeviceConfig: $("save-device-config"),
   resetDeviceConfig: $("reset-device-config"),
   testServo: $("test-servo"),
@@ -101,7 +98,6 @@ const els = {
   scheduleForm: $("schedule-form"),
   scheduleDialogTitle: $("schedule-dialog-title"),
   scheduleTime: $("schedule-time"),
-  schedulePortion: $("schedule-portion"),
   scheduleEnabled: $("schedule-enabled"),
   saveSchedule: $("save-schedule"),
   scheduleError: $("schedule-error"),
@@ -136,6 +132,7 @@ const reasonLabels = {
   invalid_portion: "份量超出范围",
   cooldown: "投喂间隔过短",
   daily_limit: "达到 24 小时上限",
+  device_busy: "设备正在执行上一条动作",
   invalid_schedule: "定时计划格式无效",
   stale_schedule: "另一台手机已保存更新的计划，请刷新后重试",
   schedule_updated: "定时计划已更新",
@@ -457,6 +454,9 @@ function renderTelemetry(payload) {
     setActionMessage("设备状态已确认舵机测试完成。", "success");
     showToast("舵机测试完成");
   }
+  if (state.pendingId && payload.last_completed_feed_command_id === state.pendingId) {
+    confirmManualFeedCompleted(state.pendingId, "设备状态已确认投喂完成。");
+  }
   if (restarted) handleDeviceRestartDuringCommand(payload.reset_reason);
 
   els.deviceId.textContent = payload.device_id || "feeder-001";
@@ -468,8 +468,6 @@ function renderTelemetry(payload) {
   els.firmware.textContent = payload.firmware || "--";
   state.deviceFirmware = String(payload.firmware || "");
   els.clockState.textContent = payload.clock_ready === true ? "已同步（北京时间）" : "同步中";
-  els.dailyPortions.textContent = Number.isFinite(Number(payload.portions_24h))
-    ? `${payload.portions_24h}/${payload.max_portions_24h || "--"} 份` : "--";
   els.dailyFeeds.textContent = Number.isFinite(Number(payload.feeds_24h))
     ? `${payload.feeds_24h}/${payload.max_feeds_24h || "--"} 次` : "--";
   els.lastFeed.textContent = payload.last_feed_at ? formatTime(payload.last_feed_at, true) : "暂无";
@@ -514,7 +512,6 @@ function setDeviceConfigForm(payload = {}) {
   els.servoMode.value = String(mode);
   const interval = clampInteger(payload.min_interval_seconds, 10, 86400, 60);
   const maxFeeds = clampInteger(payload.max_feeds_24h, 1, 100, 8);
-  const maxPortions = clampInteger(payload.max_portions_24h, 1, 300, 12);
   syncAngleInput("closed", closed);
   syncAngleInput("open", positionalTravel);
   els.positionalDirection.value = String(positionalDirection);
@@ -530,7 +527,6 @@ function setDeviceConfigForm(payload = {}) {
   els.positionalReturnMs.value = String(positionalReturnMs);
   els.minInterval.value = String(interval);
   els.maxFeeds.value = String(maxFeeds);
-  els.maxPortions.value = String(maxPortions);
   els.configStatus.textContent = state.pendingConfigId
     ? "正在保存…"
     : state.deviceConfigSupported
@@ -672,7 +668,7 @@ function normalizeSchedule(value) {
     enabled: value?.enabled === true || value?.enabled === 1,
     hour: Math.max(0, Math.min(23, Number(value?.hour || 0))),
     minute: Math.max(0, Math.min(59, Number(value?.minute || 0))),
-    portion: Math.max(1, Math.min(3, Number(value?.portion || 1))),
+    portion: 1,
     daysMask: Math.max(1, Math.min(127, Number(value?.days_mask ?? value?.daysMask ?? 127)))
   };
 }
@@ -761,7 +757,7 @@ function renderSchedules(values = currentSchedules()) {
     const summary = document.createElement("div");
     summary.className = "schedule-summary";
     const title = document.createElement("strong");
-    title.textContent = `${schedule.portion} 份 · ${schedule.enabled ? "已启用" : "已停用"}`;
+    title.textContent = `每次执行一次 · ${schedule.enabled ? "已启用" : "已停用"}`;
     const days = document.createElement("span");
     days.textContent = `${scheduleDaysLabel(schedule.daysMask)} · ${nextScheduleLabel(schedule)}`;
     summary.append(title, days);
@@ -801,7 +797,6 @@ function openScheduleDialog(index = -1) {
   state.editingScheduleIndex = index;
   els.scheduleDialogTitle.textContent = index >= 0 ? "编辑投喂计划" : "添加投喂计划";
   els.scheduleTime.value = scheduleTimeLabel(schedule);
-  els.schedulePortion.value = String(schedule.portion);
   els.scheduleEnabled.checked = schedule.enabled;
   document.querySelectorAll("#schedule-form [data-day]").forEach((input) => {
     input.checked = (schedule.daysMask & (1 << Number(input.dataset.day))) !== 0;
@@ -831,6 +826,17 @@ function confirmDeviceConfigSaved(message = "投喂参数已保存") {
   els.deviceConfigError.textContent = "";
   els.configStatus.textContent = "已保存到投喂器";
   showToast(message);
+  updateControls();
+}
+
+function confirmManualFeedCompleted(commandId, message = "投喂完成。") {
+  if (!commandId || commandId !== state.pendingId) return;
+  state.pendingId = "";
+  state.pendingExpiresAt = 0;
+  upsertHistory({ id: commandId, time: Date.now(), portion: 1, status: "completed", reason: "motor_sequence_completed" });
+  setActionMessage(message, "success");
+  showToast("投喂完成");
+  navigator.vibrate?.(80);
   updateControls();
 }
 
@@ -940,15 +946,12 @@ function handleAcknowledgement(payload) {
   if (payload.id === state.pendingId) {
     if (status === "processing") {
       setActionMessage("设备已接收，舵机正在动作。", "success");
+    } else if (status === "completed") {
+      confirmManualFeedCompleted(payload.id);
     } else {
       state.pendingId = "";
       state.pendingExpiresAt = 0;
-      if (status === "completed") {
-        setActionMessage("投喂完成。", "success");
-        showToast("投喂完成");
-        navigator.vibrate?.(80);
-      }
-      else if (status === "duplicate") setActionMessage("设备已处理过该命令，没有再次投喂。", "error");
+      if (status === "duplicate") setActionMessage("设备已处理过该命令，没有再次投喂。", "error");
       else setActionMessage(reasonLabels[payload.reason] || payload.reason || "设备拒绝执行。", "error");
     }
   }
@@ -960,7 +963,7 @@ function renderHistory() {
   if (!state.history.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 4;
+    cell.colSpan = 3;
     cell.className = "empty";
     cell.textContent = "暂无操作记录";
     row.appendChild(cell);
@@ -972,14 +975,13 @@ function renderHistory() {
     const row = document.createElement("tr");
     const values = [
       formatTime(entry.time, true),
-      entry.portion ? `${entry.portion} 份` : "--",
       statusLabels[entry.status] || entry.status,
       reasonLabels[entry.reason] || entry.reason || "--"
     ];
     values.forEach((value, index) => {
       const cell = document.createElement("td");
       cell.textContent = value;
-      if (index === 2) cell.className = `state-${entry.status}`;
+      if (index === 1) cell.className = `state-${entry.status}`;
       row.appendChild(cell);
     });
     els.historyBody.appendChild(row);
@@ -1021,11 +1023,8 @@ function updateControls() {
   const pending = Boolean(state.pendingId);
   const scheduleBusy = Boolean(state.pendingScheduleId);
   const dailyFeeds = Number(state.telemetry?.feeds_24h || 0);
-  const dailyPortions = Number(state.telemetry?.portions_24h || 0);
   const maxFeeds = Number(state.telemetry?.max_feeds_24h || 0);
-  const maxPortions = Number(state.telemetry?.max_portions_24h || 0);
-  const dailyBlocked = (maxFeeds > 0 && dailyFeeds >= maxFeeds) ||
-    (maxPortions > 0 && dailyPortions + state.portion > maxPortions);
+  const dailyBlocked = maxFeeds > 0 && dailyFeeds >= maxFeeds;
   const ready = state.brokerConnected && state.deviceOnline && !pending && cooldown === 0 && !dailyBlocked;
   els.feedButton.disabled = !ready;
   els.refreshState.disabled = !state.brokerConnected;
@@ -1060,7 +1059,7 @@ function updateControls() {
     els.feedButtonNote.textContent = "请等待24小时窗口滚动后再投喂";
     els.cooldownLabel.textContent = `今日 ${dailyFeeds}/${maxFeeds || "--"} 次`;
   } else {
-    els.feedButtonTitle.textContent = `投喂 ${state.portion} 份`;
+    els.feedButtonTitle.textContent = "立即投喂";
     els.feedButtonNote.textContent = "点击后需要再次确认";
     els.cooldownLabel.textContent = "设备可以执行";
   }
@@ -1085,7 +1084,7 @@ function readDeviceConfigForm() {
   const positionalReturnMs = clampInteger(els.positionalReturnMs.value, 100, 10000, 1000);
   const minInterval = clampInteger(els.minInterval.value, 10, 86400, 60);
   const maxFeeds = clampInteger(els.maxFeeds.value, 1, 100, 8);
-  const maxPortions = clampInteger(els.maxPortions.value, 1, 300, 12);
+  const maxPortions = maxFeeds;
   if (mode === 0 && (positionalTarget < 0 || positionalTarget > 180)) throw new Error(`180°模式的目标位置是${positionalTarget}°，已超出0～180°。请调整起始位置、方向或转动角度。`);
   if (mode === 1 && Math.abs(forwardUs - stopUs) < 20) throw new Error("正转脉宽与停止脉宽过于接近，连续舵机可能不会转动。");
   return { mode, closed, open, turnDegrees, msPerRev, forwardUs, reverseUs, stopUs, direction, continuousReturn, positionalMoveMs, actionPauseMs, positionalReturnMs, minInterval, maxFeeds, maxPortions };
@@ -1209,14 +1208,14 @@ async function sendServoTestCommand() {
 
 async function sendFeedCommand() {
   if (!state.client || !state.config || els.feedButton.disabled) return;
-  if (!window.confirm(`确认立即投喂 ${state.portion} 份？`)) return;
+  if (!window.confirm("确认立即投喂一次？")) return;
 
   const now = Math.floor(Date.now() / 1000);
   const command = {
     v: 1,
     id: randomId(),
     action: "feed",
-    portion: state.portion,
+    portion: 1,
     issued_at: now,
     expires_at: now + COMMAND_VALID_SECONDS
   };
@@ -1226,9 +1225,9 @@ async function sendFeedCommand() {
     state.pendingId = command.id;
     state.pendingExpiresAt = Math.max(
       (command.expires_at + 5) * 1000,
-      Date.now() + estimatedServoActionMs(state.portion) + 15000
+      Date.now() + estimatedServoActionMs(1) + 15000
     );
-    upsertHistory({ id: command.id, time: Date.now(), portion: state.portion, status: "sent", reason: "" });
+    upsertHistory({ id: command.id, time: Date.now(), portion: 1, status: "sent", reason: "" });
     updateControls();
     setActionMessage("命令已发送，等待设备确认。", "success");
     state.client.publish(topic("feeder_cmd"), JSON.stringify(command), { qos: 1, retain: false }, (error) => {
@@ -1311,7 +1310,6 @@ function bindEvents() {
     els.actionPauseMs,
     els.minInterval,
     els.maxFeeds,
-    els.maxPortions
   ].forEach((element) => {
     const eventName = element.tagName === "SELECT" ? "change" : "input";
     element.addEventListener(eventName, () => {
@@ -1346,18 +1344,10 @@ function bindEvents() {
     els.continuousReturn.value = "1";
     els.minInterval.value = "60";
     els.maxFeeds.value = "8";
-    els.maxPortions.value = "12";
     updateServoModeVisibility();
     els.deviceConfigError.textContent = "已填入默认值，点击“保存到投喂器”后才会生效。";
   });
 
-  document.querySelectorAll(".portion-button").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.portion = Number(button.dataset.portion);
-      document.querySelectorAll(".portion-button").forEach((item) => item.classList.toggle("is-selected", item === button));
-      updateControls();
-    });
-  });
 
   $("open-settings").addEventListener("click", openSettings);
   $("close-settings").addEventListener("click", closeSettings);
@@ -1392,7 +1382,7 @@ function bindEvents() {
       enabled: els.scheduleEnabled.checked,
       hour,
       minute,
-      portion: Number(els.schedulePortion.value),
+      portion: 1,
       daysMask
     });
     const schedules = currentSchedules();

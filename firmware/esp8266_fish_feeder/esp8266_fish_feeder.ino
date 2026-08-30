@@ -27,7 +27,7 @@ static_assert(
   "MIN_FEED_INTERVAL_SECONDS must be at least COMMAND_MAX_AGE_SECONDS."
 );
 
-static const char *FIRMWARE_VERSION = "1.5.2";
+static const char *FIRMWARE_VERSION = "1.5.3";
 static const uint32_t SAFETY_MAGIC = 0x46454548UL;
 static const uint32_t WIFI_CONFIG_MAGIC = 0x57494649UL;
 static const uint32_t DOUBLE_RESET_MAGIC = 0x44525354UL;
@@ -104,6 +104,7 @@ String lastError;
 String lastFeedSource;
 String lastServoTestCommandId;
 String lastServoTestStatus;
+String lastCompletedFeedCommandId;
 String pendingCommandBody;
 
 uint32_t lastMqttAttemptAt = 0;
@@ -116,6 +117,36 @@ bool mdnsStarted = false;
 bool stateQueryPending = false;
 uint32_t restartAt = 0;
 uint32_t doubleResetMarkerSetAt = 0;
+
+enum ServoMotionSource : uint8_t {
+  MOTION_SOURCE_NONE = 0,
+  MOTION_SOURCE_MANUAL = 1,
+  MOTION_SOURCE_TEST = 2,
+  MOTION_SOURCE_SCHEDULE = 3
+};
+
+enum ServoMotionPhase : uint8_t {
+  MOTION_PHASE_IDLE = 0,
+  MOTION_PHASE_PREPARE,
+  MOTION_PHASE_FORWARD,
+  MOTION_PHASE_PAUSE,
+  MOTION_PHASE_RETURN,
+  MOTION_PHASE_SETTLE
+};
+
+struct ServoMotionJob {
+  ServoMotionSource source;
+  ServoMotionPhase phase;
+  String commandId;
+  uint32_t phaseStartedAt;
+  uint32_t phaseDurationMs;
+  uint32_t lastStepAt;
+  uint32_t continuousRunMs;
+  uint16_t driveUs;
+  uint16_t returnUs;
+};
+
+ServoMotionJob servoMotion{MOTION_SOURCE_NONE, MOTION_PHASE_IDLE, "", 0, 0, 0, 0, 0, 0};
 
 struct ResetMarker {
   uint32_t magic;
@@ -425,6 +456,7 @@ void publishState() {
   document["last_config_command_id"] = safetyState.lastConfigCommandId;
   document["last_servo_test_command_id"] = lastServoTestCommandId;
   document["last_servo_test_status"] = lastServoTestStatus;
+  document["last_completed_feed_command_id"] = lastCompletedFeedCommandId;
   document["reset_reason"] = ESP.getResetReason();
   document["last_error"] = lastError;
   document["last_feed_source"] = lastFeedSource;
@@ -452,31 +484,6 @@ void publishOnline(bool online) {
   publishJson(onlineTopic, document, true);
 }
 
-void waitWithMqtt(uint32_t durationMs) {
-  const uint32_t startedAt = millis();
-  while (!due(millis(), startedAt, durationMs)) {
-    if (mqttClient.connected()) mqttClient.loop();
-    delay(10);
-    yield();
-  }
-}
-
-void movePositionalServo(uint16_t fromAngle, uint16_t toAngle, uint32_t durationMs) {
-  const uint32_t stepIntervalMs = 20UL;
-  const uint32_t steps = durationMs / stepIntervalMs > 0 ? durationMs / stepIntervalMs : 1UL;
-  const int32_t delta = static_cast<int32_t>(toAngle) - static_cast<int32_t>(fromAngle);
-  const uint32_t startedAt = millis();
-
-  for (uint32_t step = 1; step <= steps; ++step) {
-    const int32_t angle = static_cast<int32_t>(fromAngle) + (delta * static_cast<int32_t>(step)) / static_cast<int32_t>(steps);
-    feederServo.write(static_cast<int>(angle));
-    const uint32_t targetElapsed = (durationMs * step) / steps;
-    const uint32_t elapsed = static_cast<uint32_t>(millis() - startedAt);
-    if (targetElapsed > elapsed) waitWithMqtt(targetElapsed - elapsed);
-  }
-  feederServo.write(toAngle);
-}
-
 void attachFeederServo() {
   if (safetyState.servoMode == 0) {
     feederServo.attach(
@@ -490,65 +497,154 @@ void attachFeederServo() {
   }
 }
 
-bool runServoCycles(int portion) {
+bool servoMotionActive() {
+  return servoMotion.source != MOTION_SOURCE_NONE;
+}
+
+void setServoMotionPhase(ServoMotionPhase phase, uint32_t durationMs) {
+  servoMotion.phase = phase;
+  servoMotion.phaseStartedAt = millis();
+  servoMotion.phaseDurationMs = durationMs;
+  servoMotion.lastStepAt = servoMotion.phaseStartedAt;
+}
+
+void finishServoMotion(bool completed) {
+  if (feederServo.attached()) feederServo.detach();
+  const ServoMotionSource source = servoMotion.source;
+  const String commandId = servoMotion.commandId;
+  servoMotion.source = MOTION_SOURCE_NONE;
+  servoMotion.phase = MOTION_PHASE_IDLE;
+  servoMotion.commandId = "";
+
+  if (source == MOTION_SOURCE_TEST) {
+    lastServoTestStatus = completed ? "completed" : "failed";
+    lastError = completed ? "" : "servo_failed";
+    publishAcknowledgement(
+      commandId,
+      completed ? "completed" : "failed",
+      1,
+      completed ? "servo_test_completed" : "servo_failed",
+      "servo_test"
+    );
+  } else if (source == MOTION_SOURCE_MANUAL) {
+    lastError = completed ? "" : "servo_failed";
+    if (completed) {
+      lastFeedSource = "manual";
+      lastCompletedFeedCommandId = commandId;
+    }
+    publishAcknowledgement(
+      commandId,
+      completed ? "completed" : "failed",
+      1,
+      completed ? "motor_sequence_completed" : "servo_failed"
+    );
+  } else if (source == MOTION_SOURCE_SCHEDULE) {
+    lastError = completed ? "" : "servo_failed";
+    if (completed) lastFeedSource = "schedule";
+  }
+  publishState();
+}
+
+bool startServoMotion(ServoMotionSource source, const String &commandId = "") {
+  if (servoMotionActive()) return false;
   Serial.printf(
-    "Servo sequence: mode=%u portion=%d closed=%u open=%u\n",
+    "Servo sequence: mode=%u closed=%u open=%u\n",
     safetyState.servoMode,
-    portion,
     safetyState.servoClosedAngle,
     safetyState.servoOpenAngle
   );
+
+  servoMotion.source = source;
+  servoMotion.commandId = commandId;
   attachFeederServo();
   if (!feederServo.attached()) {
     Serial.println("Servo attach failed");
+    servoMotion.source = MOTION_SOURCE_NONE;
+    servoMotion.commandId = "";
     return false;
   }
 
   if (safetyState.servoMode == 1) {
-    if (safetyState.continuousTurnDegrees == 0) {
-      feederServo.writeMicroseconds(safetyState.continuousStopUs);
-      waitWithMqtt(120);
-      feederServo.detach();
-      return true;
-    }
     const uint32_t calculatedRunMs =
       (static_cast<uint32_t>(safetyState.continuousTurnDegrees) * safetyState.continuousMsPerRev) / 360UL;
-    const uint32_t runMs = calculatedRunMs < 50UL ? 50UL : calculatedRunMs;
-    const uint16_t driveUs = safetyState.continuousDirection == 1
+    servoMotion.continuousRunMs = calculatedRunMs < 50UL ? 50UL : calculatedRunMs;
+    servoMotion.driveUs = safetyState.continuousDirection == 1
       ? safetyState.continuousReverseUs
       : safetyState.continuousForwardUs;
-    const uint16_t returnUs = safetyState.continuousDirection == 1
+    servoMotion.returnUs = safetyState.continuousDirection == 1
       ? safetyState.continuousForwardUs
       : safetyState.continuousReverseUs;
     feederServo.writeMicroseconds(safetyState.continuousStopUs);
-    waitWithMqtt(120);
-    for (int i = 0; i < portion; ++i) {
-      feederServo.writeMicroseconds(driveUs);
-      waitWithMqtt(runMs);
-      feederServo.writeMicroseconds(safetyState.continuousStopUs);
-      waitWithMqtt(safetyState.actionPauseMs);
-      if (safetyState.continuousReturn == 1) {
-        feederServo.writeMicroseconds(returnUs);
-        waitWithMqtt(runMs);
-        feederServo.writeMicroseconds(safetyState.continuousStopUs);
-      }
-      waitWithMqtt(SERVO_SETTLE_MS);
-    }
-    feederServo.detach();
+    setServoMotionPhase(MOTION_PHASE_PREPARE, 120UL);
     return true;
   }
 
   feederServo.write(safetyState.servoClosedAngle);
-  waitWithMqtt(250);
-  for (int i = 0; i < portion; ++i) {
-    movePositionalServo(safetyState.servoClosedAngle, safetyState.servoOpenAngle, safetyState.positionalMoveMs);
-    waitWithMqtt(safetyState.actionPauseMs);
-    movePositionalServo(safetyState.servoOpenAngle, safetyState.servoClosedAngle, safetyState.positionalReturnMs);
-    waitWithMqtt(SERVO_SETTLE_MS);
-  }
-  feederServo.detach();
-  Serial.println("Servo sequence completed");
+  setServoMotionPhase(MOTION_PHASE_PREPARE, 250UL);
   return true;
+}
+
+void serviceServoMotion() {
+  if (!servoMotionActive()) return;
+  const uint32_t now = millis();
+  const uint32_t elapsed = static_cast<uint32_t>(now - servoMotion.phaseStartedAt);
+
+  if (safetyState.servoMode == 0 &&
+      (servoMotion.phase == MOTION_PHASE_FORWARD || servoMotion.phase == MOTION_PHASE_RETURN)) {
+    if (!due(now, servoMotion.lastStepAt, 20UL) && elapsed < servoMotion.phaseDurationMs) return;
+    servoMotion.lastStepAt = now;
+    const uint32_t duration = servoMotion.phaseDurationMs > 0 ? servoMotion.phaseDurationMs : 1UL;
+    const uint32_t progress = elapsed < duration ? elapsed : duration;
+    const int32_t fromAngle = servoMotion.phase == MOTION_PHASE_FORWARD
+      ? safetyState.servoClosedAngle
+      : safetyState.servoOpenAngle;
+    const int32_t toAngle = servoMotion.phase == MOTION_PHASE_FORWARD
+      ? safetyState.servoOpenAngle
+      : safetyState.servoClosedAngle;
+    const int32_t angle = fromAngle + ((toAngle - fromAngle) * static_cast<int32_t>(progress)) / static_cast<int32_t>(duration);
+    feederServo.write(static_cast<int>(angle));
+  }
+
+  if (elapsed < servoMotion.phaseDurationMs) return;
+
+  switch (servoMotion.phase) {
+    case MOTION_PHASE_PREPARE:
+      if (safetyState.servoMode == 0) {
+        setServoMotionPhase(MOTION_PHASE_FORWARD, safetyState.positionalMoveMs);
+      } else {
+        feederServo.writeMicroseconds(servoMotion.driveUs);
+        setServoMotionPhase(MOTION_PHASE_FORWARD, servoMotion.continuousRunMs);
+      }
+      break;
+    case MOTION_PHASE_FORWARD:
+      if (safetyState.servoMode == 0) feederServo.write(safetyState.servoOpenAngle);
+      else feederServo.writeMicroseconds(safetyState.continuousStopUs);
+      setServoMotionPhase(MOTION_PHASE_PAUSE, safetyState.actionPauseMs);
+      break;
+    case MOTION_PHASE_PAUSE:
+      if (safetyState.servoMode == 1 && safetyState.continuousReturn != 1) {
+        setServoMotionPhase(MOTION_PHASE_SETTLE, SERVO_SETTLE_MS);
+      } else {
+        if (safetyState.servoMode == 1) feederServo.writeMicroseconds(servoMotion.returnUs);
+        setServoMotionPhase(
+          MOTION_PHASE_RETURN,
+          safetyState.servoMode == 0 ? safetyState.positionalReturnMs : servoMotion.continuousRunMs
+        );
+      }
+      break;
+    case MOTION_PHASE_RETURN:
+      if (safetyState.servoMode == 0) feederServo.write(safetyState.servoClosedAngle);
+      else feederServo.writeMicroseconds(safetyState.continuousStopUs);
+      setServoMotionPhase(MOTION_PHASE_SETTLE, SERVO_SETTLE_MS);
+      break;
+    case MOTION_PHASE_SETTLE:
+      Serial.println("Servo sequence completed");
+      finishServoMotion(true);
+      break;
+    default:
+      finishServoMotion(false);
+      break;
+  }
 }
 
 void rejectCommand(const String &id, int portion, const char *reason) {
@@ -748,6 +844,10 @@ void processConfigCommand(JsonDocument &document) {
     rejectConfigCommand(commandId, "stale_config");
     return;
   }
+  if (servoMotionActive()) {
+    rejectConfigCommand(commandId, "device_busy");
+    return;
+  }
 
   int mode = 0;
   int closedAngle = 0;
@@ -909,6 +1009,12 @@ void processServoTestCommand(JsonDocument &document) {
     publishAcknowledgement(commandId, "duplicate", portion, "duplicate_command", "servo_test");
     return;
   }
+  if (servoMotionActive()) {
+    lastError = "device_busy";
+    publishAcknowledgement(commandId, "rejected", portion, "device_busy", "servo_test");
+    publishState();
+    return;
+  }
   lastServoTestCommandId = commandId;
   lastServoTestStatus = "processing";
 
@@ -919,17 +1025,12 @@ void processServoTestCommand(JsonDocument &document) {
     safetyState.servoOpenAngle
   );
   publishAcknowledgement(commandId, "processing", portion, "", "servo_test");
-  const bool completed = runServoCycles(1);
-  lastServoTestStatus = completed ? "completed" : "failed";
-  lastError = completed ? "" : "servo_failed";
-  publishAcknowledgement(
-    commandId,
-    completed ? "completed" : "failed",
-    portion,
-    completed ? "servo_test_completed" : "servo_failed",
-    "servo_test"
-  );
-  publishState();
+  if (!startServoMotion(MOTION_SOURCE_TEST, commandId)) {
+    lastServoTestStatus = "failed";
+    lastError = "servo_failed";
+    publishAcknowledgement(commandId, "failed", portion, "servo_failed", "servo_test");
+    publishState();
+  }
 }
 
 void processFeedCommand(JsonDocument &document) {
@@ -945,7 +1046,7 @@ void processFeedCommand(JsonDocument &document) {
     rejectCommand(commandId, portion, "invalid_payload");
     return;
   }
-  if (portion < 1 || portion > MAX_PORTION) {
+  if (portion != 1) {
     rejectCommand(commandId, portion, "invalid_portion");
     return;
   }
@@ -972,14 +1073,17 @@ void processFeedCommand(JsonDocument &document) {
     publishAcknowledgement(commandId, "duplicate", portion, "duplicate_command");
     return;
   }
+  if (servoMotionActive()) {
+    rejectCommand(commandId, portion, "device_busy");
+    return;
+  }
 
   refreshRollingWindow(now);
   if (safetyState.lastFeedAt > 0 && now >= safetyState.lastFeedAt && now - safetyState.lastFeedAt < safetyState.minFeedIntervalSeconds) {
     rejectCommand(commandId, portion, "cooldown");
     return;
   }
-  if (safetyState.feedsInWindow >= safetyState.maxFeedsPer24h ||
-      safetyState.portionsInWindow + portion > safetyState.maxPortionsPer24h) {
+  if (safetyState.feedsInWindow >= safetyState.maxFeedsPer24h) {
     rejectCommand(commandId, portion, "daily_limit");
     return;
   }
@@ -989,24 +1093,20 @@ void processFeedCommand(JsonDocument &document) {
   memset(safetyState.lastCommandId, 0, sizeof(safetyState.lastCommandId));
   commandId.toCharArray(safetyState.lastCommandId, sizeof(safetyState.lastCommandId));
   safetyState.lastFeedAt = now;
-  safetyState.portionsInWindow += portion;
+  safetyState.portionsInWindow += 1;
   safetyState.feedsInWindow += 1;
   saveSafetyState();
 
   publishAcknowledgement(commandId, "processing", portion, "");
-  const bool completed = runServoCycles(portion);
-  if (completed) {
-    lastError = "";
-    lastFeedSource = "manual";
-    publishAcknowledgement(commandId, "completed", portion, "motor_sequence_completed");
-  } else {
+  if (!startServoMotion(MOTION_SOURCE_MANUAL, commandId)) {
     lastError = "servo_failed";
     publishAcknowledgement(commandId, "failed", portion, "servo_failed");
+    publishState();
   }
-  publishState();
 }
 
-void runScheduledFeed(uint8_t scheduleIndex, int portion, uint32_t now) {
+void runScheduledFeed(uint8_t scheduleIndex, uint32_t now) {
+  if (servoMotionActive()) return;
   refreshRollingWindow(now);
   if (
     safetyState.lastFeedAt > 0 &&
@@ -1017,32 +1117,27 @@ void runScheduledFeed(uint8_t scheduleIndex, int portion, uint32_t now) {
     publishState();
     return;
   }
-  if (safetyState.feedsInWindow >= safetyState.maxFeedsPer24h ||
-      safetyState.portionsInWindow + portion > safetyState.maxPortionsPer24h) {
+  if (safetyState.feedsInWindow >= safetyState.maxFeedsPer24h) {
     lastError = "schedule_daily_limit";
     publishState();
     return;
   }
 
   safetyState.lastFeedAt = now;
-  safetyState.portionsInWindow += portion;
+  safetyState.portionsInWindow += 1;
   safetyState.feedsInWindow += 1;
   saveSafetyState();
 
-  lastFeedSource = "schedule";
-  const bool completed = runServoCycles(portion);
-  lastError = completed ? "" : "servo_failed";
-  Serial.printf(
-    "Schedule %u %s, portion: %d\n",
-    scheduleIndex,
-    completed ? "completed" : "failed",
-    portion
-  );
-  publishState();
+  if (!startServoMotion(MOTION_SOURCE_SCHEDULE)) {
+    lastError = "servo_failed";
+    publishState();
+    return;
+  }
+  Serial.printf("Schedule %u started\n", scheduleIndex);
 }
 
 void checkSchedules() {
-  if (!clockReady() || safetyState.scheduleCount == 0) return;
+  if (!clockReady() || safetyState.scheduleCount == 0 || servoMotionActive()) return;
 
   const uint32_t now = epochNow();
   const uint32_t localNow = now + TIMEZONE_OFFSET_SECONDS;
@@ -1071,7 +1166,7 @@ void checkSchedules() {
     // not run the same schedule twice on the same local day.
     schedule.lastRunLocalDay = localDay;
     saveSafetyState();
-    runScheduledFeed(i, schedule.portion, now);
+    runScheduledFeed(i, now);
   }
 }
 
@@ -1338,6 +1433,7 @@ void setup() {
 }
 
 void loop() {
+  serviceServoMotion();
   if (!configPortalActive && doubleResetMarkerSetAt != 0 && due(millis(), doubleResetMarkerSetAt, DOUBLE_RESET_WINDOW_MS)) {
     clearDoubleResetMarker();
     doubleResetMarkerSetAt = 0;
