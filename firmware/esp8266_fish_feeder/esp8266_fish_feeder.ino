@@ -27,7 +27,7 @@ static_assert(
   "MIN_FEED_INTERVAL_SECONDS must be at least COMMAND_MAX_AGE_SECONDS."
 );
 
-static const char *FIRMWARE_VERSION = "1.5.0";
+static const char *FIRMWARE_VERSION = "1.5.1";
 static const uint32_t SAFETY_MAGIC = 0x46454548UL;
 static const uint32_t WIFI_CONFIG_MAGIC = 0x57494649UL;
 static const uint32_t DOUBLE_RESET_MAGIC = 0x44525354UL;
@@ -103,6 +103,7 @@ String queryTopic;
 String lastError;
 String lastFeedSource;
 String lastServoTestCommandId;
+String pendingCommandBody;
 
 uint32_t lastMqttAttemptAt = 0;
 uint32_t lastStatePublishAt = 0;
@@ -111,6 +112,7 @@ bool clockWasReady = false;
 bool configPortalActive = false;
 bool configServerStarted = false;
 bool mdnsStarted = false;
+bool stateQueryPending = false;
 uint32_t restartAt = 0;
 uint32_t doubleResetMarkerSetAt = 0;
 
@@ -1083,16 +1085,29 @@ void checkSchedules() {
 void onMqttMessage(char *incomingTopic, byte *payload, unsigned int length) {
   if (length == 0 || length > 900) return;
 
-  String body;
-  body.reserve(length);
-  for (unsigned int i = 0; i < length; ++i) body += static_cast<char>(payload[i]);
-
   const String receivedTopic(incomingTopic);
   if (receivedTopic == queryTopic) {
-    publishState();
+    stateQueryPending = true;
     return;
   }
   if (receivedTopic != commandTopic) return;
+
+  // PubSubClient invokes this callback from mqttClient.loop(). Running a
+  // multi-second servo sequence here prevents MQTT acknowledgements and
+  // keepalive traffic from being handled reliably. Copy the command and let
+  // the main loop process it after the callback has returned.
+  if (pendingCommandBody.length() > 0) return;
+  pendingCommandBody.reserve(length);
+  for (unsigned int i = 0; i < length; ++i) {
+    pendingCommandBody += static_cast<char>(payload[i]);
+  }
+}
+
+void processPendingMqttCommand() {
+  if (pendingCommandBody.length() == 0) return;
+
+  String body = pendingCommandBody;
+  pendingCommandBody = "";
 
   StaticJsonDocument<896> document;
   const DeserializationError error = deserializeJson(document, body);
@@ -1355,6 +1370,11 @@ void loop() {
   }
 
   mqttClient.loop();
+  if (stateQueryPending) {
+    stateQueryPending = false;
+    publishState();
+  }
+  processPendingMqttCommand();
   const uint32_t now = millis();
   const bool timeIsReady = clockReady();
   if (timeIsReady && !clockWasReady) {

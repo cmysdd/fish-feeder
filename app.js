@@ -7,7 +7,7 @@ const MAX_HISTORY = 30;
 const MAX_SCHEDULES = 6;
 const DEFAULT_USERNAME = "2675752317@qq.com";
 const DEFAULT_PROJECT = "fish";
-const MOTION_SEQUENCE_FIRMWARE = "1.5.0";
+const MOTION_SEQUENCE_FIRMWARE = "1.5.1";
 
 const state = {
   client: null,
@@ -514,7 +514,7 @@ function setDeviceConfigForm(payload = {}) {
       ? "已读取设备参数"
       : firmware && !firmwareSupportsMotion
         ? `当前固件${firmware}，请烧录${MOTION_SEQUENCE_FIRMWARE}`
-        : "等待设备回传1.5.0参数";
+        : `等待设备回传${MOTION_SEQUENCE_FIRMWARE}参数`;
   els.deviceConfigError.textContent = state.deviceConfigSupported
     ? ""
     : firmware && !firmwareSupportsMotion
@@ -522,8 +522,12 @@ function setDeviceConfigForm(payload = {}) {
       : "等待设备回传完整动作参数。";
   els.saveDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   els.resetDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
-  els.testServo.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId) || Boolean(state.pendingServoTestId);
-  els.servoTestStatus.textContent = state.pendingServoTestId ? "设备正在执行测试…" : "保存参数后可空载测试一次";
+  els.testServo.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || state.deviceConfigDirty || Boolean(state.pendingConfigId) || Boolean(state.pendingServoTestId);
+  els.servoTestStatus.textContent = state.pendingServoTestId
+    ? "设备正在执行测试…"
+    : state.deviceConfigDirty
+      ? "参数尚未保存，请先保存到投喂器"
+      : "当前参数已保存，可空载测试一次";
   updateServoModeVisibility();
 }
 
@@ -563,11 +567,19 @@ function bindAngleInputs(name) {
     range.value = String(next);
     number.value = String(next);
     output.textContent = `${next}°`;
-    state.deviceConfigDirty = true;
+    markDeviceConfigDirty();
     updateServoModeVisibility();
   };
   range.addEventListener("input", () => update(range.value));
   number.addEventListener("input", () => update(number.value));
+}
+
+function markDeviceConfigDirty() {
+  state.deviceConfigDirty = true;
+  els.configStatus.textContent = "参数尚未保存";
+  els.servoTestStatus.textContent = "参数尚未保存，请先保存到投喂器";
+  els.deviceConfigError.textContent = "请先点击“保存到投喂器”，收到设备确认后再测试。";
+  updateControls();
 }
 
 function positionalTargetAngle() {
@@ -625,7 +637,7 @@ function bindTurnDegrees() {
   const update = (value) => {
     const next = clampInteger(value, 1, 360, Number(els.turnDegrees.value));
     syncTurnDegrees(next);
-    state.deviceConfigDirty = true;
+    markDeviceConfigDirty();
     updateServoModeVisibility();
   };
   els.turnDegrees.addEventListener("input", () => update(els.turnDegrees.value));
@@ -969,7 +981,7 @@ function updateControls() {
   els.saveSchedule.disabled = scheduleBusy || !state.brokerConnected || !state.deviceOnline;
   els.saveDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
   els.resetDeviceConfig.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId);
-  els.testServo.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || Boolean(state.pendingConfigId) || Boolean(state.pendingServoTestId);
+  els.testServo.disabled = !state.brokerConnected || !state.deviceOnline || !state.deviceConfigSupported || state.deviceConfigDirty || Boolean(state.pendingConfigId) || Boolean(state.pendingServoTestId);
   document.querySelectorAll(".schedule-actions .button").forEach((button) => {
     button.disabled = !state.brokerConnected || !state.deviceOnline || scheduleBusy;
   });
@@ -1087,6 +1099,13 @@ async function sendServoTestCommand() {
   if (!state.deviceConfigSupported) {
     const message = `当前ESP8266固件${state.deviceFirmware || "未知"}不支持新版舵机测试，请先烧录${MOTION_SEQUENCE_FIRMWARE}。`;
     els.deviceConfigError.textContent = message;
+    showToast(message, "error");
+    return;
+  }
+  if (state.deviceConfigDirty) {
+    const message = "当前动作参数还没有保存到ESP8266，请先保存并等待设备确认后再测试。";
+    els.deviceConfigError.textContent = message;
+    els.servoTestStatus.textContent = "请先保存当前参数";
     showToast(message, "error");
     return;
   }
@@ -1220,7 +1239,7 @@ function bindEvents() {
   bindTurnDegrees();
   updateServoModeVisibility();
   els.servoMode.addEventListener("change", () => {
-    state.deviceConfigDirty = true;
+    markDeviceConfigDirty();
     updateServoModeVisibility();
   });
   [
@@ -1240,7 +1259,7 @@ function bindEvents() {
   ].forEach((element) => {
     const eventName = element.tagName === "SELECT" ? "change" : "input";
     element.addEventListener(eventName, () => {
-      state.deviceConfigDirty = true;
+      markDeviceConfigDirty();
       updateServoModeVisibility();
     });
   });
@@ -1254,7 +1273,7 @@ function bindEvents() {
   });
   els.testServo.addEventListener("click", sendServoTestCommand);
   els.resetDeviceConfig.addEventListener("click", () => {
-    state.deviceConfigDirty = true;
+    markDeviceConfigDirty();
     els.servoMode.value = "1";
     syncAngleInput("closed", 90);
     syncAngleInput("open", 90);
@@ -1453,8 +1472,8 @@ function tick() {
   if (state.pendingServoTestId && Date.now() > state.pendingServoTestExpiresAt) {
     state.pendingServoTestId = "";
     state.pendingServoTestExpiresAt = 0;
-    els.servoTestStatus.textContent = "设备未确认测试，请检查连接";
-    els.deviceConfigError.textContent = "设备没有确认舵机测试，请先请求状态并检查固件版本。";
+    els.servoTestStatus.textContent = "未收到测试完成确认";
+    els.deviceConfigError.textContent = "舵机可能已经动作，但网页没有收到完成确认。请勿立即重复测试，先请求一次设备状态并观察舵机位置。";
   }
   updateControls();
 }
