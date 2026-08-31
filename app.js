@@ -494,9 +494,9 @@ function setDeviceConfigForm(payload = {}) {
   const firmwareSupportsMotion = firmwareVersionAtLeast(firmware, MOTION_SEQUENCE_FIRMWARE);
   state.deviceConfigSupported = hasMotionFields && firmwareSupportsMotion;
   if (state.deviceConfigDirty || state.pendingConfigId) return;
-  const mode = clampInteger(payload.servo_mode, 0, 1, 1);
-  const closed = clampInteger(payload.servo_closed_angle, 0, 180, 90);
-  const open = clampInteger(payload.servo_open_angle, 0, 180, 180);
+  const mode = clampInteger(payload.servo_mode, 0, 1, 0);
+  const closed = clampInteger(payload.servo_closed_angle, 0, 180, 10);
+  const open = clampInteger(payload.servo_open_angle, 0, 180, 170);
   const positionalDirection = open >= closed ? 0 : 1;
   const positionalTravel = Math.max(1, Math.abs(open - closed));
   const turnDegrees = clampInteger(payload.continuous_turn_degrees, 1, 360, 90);
@@ -1328,13 +1328,13 @@ function bindEvents() {
   els.testServo.addEventListener("click", sendServoTestCommand);
   els.resetDeviceConfig.addEventListener("click", () => {
     markDeviceConfigDirty();
-    els.servoMode.value = "1";
-    syncAngleInput("closed", 90);
-    syncAngleInput("open", 90);
+    els.servoMode.value = "0";
+    syncAngleInput("closed", 10);
+    syncAngleInput("open", 160);
     els.positionalDirection.value = "0";
     els.positionalMoveMs.value = "1000";
     els.positionalReturnMs.value = "1000";
-    els.actionPauseMs.value = "1000";
+    els.actionPauseMs.value = "800";
     syncTurnDegrees(90);
     els.msPerRev.value = "4000";
     els.forwardUs.value = "1700";

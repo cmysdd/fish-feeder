@@ -18,7 +18,7 @@ GitHub Pages 只负责免费托管静态 HTML、CSS 和 JavaScript，不运行�
 ## 已实现功能
 
 - 手机网页点击“立即投喂”执行一次完整动作
-- 网页默认使用360°连续旋转舵机，也可切换180°定位舵机；两种模式都支持“去程→停留→回程”动作，180°模式可设置方向、角度和去/回程时间，参数保存在设备 EEPROM
+- 网页默认使用180°定位舵机，也可切换360°连续旋转舵机；两种模式都支持“去程→停留→回程”动作，180°模式可设置方向、角度和去/回程时间，参数保存在设备 EEPROM
 - 最多 6 条设备本地定时计划，可设置时间、星期和启停状态；每条计划每次执行一次动作
 - 定时计划保存在 ESP8266 EEPROM，手机关机或网页关闭后仍会执行
 - MixIO WSS 实时连接和设备在线状态
@@ -40,6 +40,7 @@ GitHub Pages 只负责免费托管静态 HTML、CSS 和 JavaScript，不运行�
 
 - [完整项目方案](docs/project-plan.md)
 - [硬件采购、供电、接线和机械结构](docs/hardware.md)
+- [180° SG90 可打印机械结构](mechanical/README.md)
 - [MixIO 注册、项目和主题配置](docs/mixio-setup.md)
 - [GitHub Pages 部署、Arduino 烧录和首次联调](docs/deployment.md)
 - [MQTT 消息协议和安全设计](docs/protocol.md)
